@@ -7,7 +7,10 @@ service firebase.storage {
     }
 
     function marketingOwner() {
-      return signedIn() && request.auth.token.email in ['lunadein2022@gmail.com'];
+      return signedIn() && request.auth.token.email in [
+        'lunadein2022@gmail.com',
+        'lunachae827@gmail.com'
+      ];
     }
 
     function validImportFile() {
