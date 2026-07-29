@@ -1,11 +1,14 @@
+@import url("https://cdn.jsdelivr.net/gh/sun-typeface/SUIT@2/fonts/variable/woff2/SUIT-Variable.css");
+
 :root {
   font-family:
-    Inter, "Pretendard", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    "SUIT Variable", SUIT, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   color: #141821;
   background: #eef2f6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   --surface: rgba(255, 255, 255, 0.94);
   --surface-solid: #ffffff;
   --surface-soft: #f7f9fc;
@@ -49,7 +52,9 @@ body {
 }
 
 button,
-select {
+select,
+input,
+textarea {
   font: inherit;
 }
 
@@ -1796,22 +1801,33 @@ h3 {
   gap: 3px;
 }
 
-.issue-actions {
+.issue-meta {
   display: flex !important;
   flex-direction: row !important;
-  gap: 6px !important;
+  align-items: center;
+  gap: 8px !important;
+  flex-wrap: wrap;
   margin-top: 8px;
 }
 
-.issue-actions button {
-  min-height: 28px;
-  padding: 0 9px;
+.issue-meta span {
+  display: inline-flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 0 8px;
   border: 1px solid #dfe6ef;
-  border-radius: 7px;
+  border-radius: 999px;
   background: #fff;
-  color: #263143;
+  color: #536072;
   font-size: 12px;
   font-weight: 900;
+}
+
+.issue-meta b {
+  color: #111827;
+  font-size: 11px;
 }
 
 .table-scroll {
@@ -2770,16 +2786,20 @@ select {
 
 .scope-tabs {
   display: flex;
+  align-items: center;
   gap: 7px;
+  min-height: 48px;
   overflow-x: auto;
-  padding-bottom: 2px;
+  overflow-y: hidden;
+  padding: 5px 2px 10px;
+  scrollbar-gutter: stable;
 }
 
 .scope-tab {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-height: 34px;
+  min-height: 36px;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2787,6 +2807,15 @@ select {
   color: #263143;
   font-weight: 900;
   white-space: nowrap;
+}
+
+.scope-tabs::-webkit-scrollbar {
+  height: 8px;
+}
+
+.scope-tabs::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: #cbd5e1;
 }
 
 .scope-tab.active {

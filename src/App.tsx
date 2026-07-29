@@ -3625,6 +3625,26 @@ function AdContentEditor({
   );
 }
 
+function getDataIssueImpact(issue: DataCenterSnapshot["issues"][number]) {
+  const source = `${issue.title} ${issue.detail}`;
+  if (/TikTok|틱톡/.test(source)) return "Channels · TikTok";
+  if (/LinkedIn|링크드인/.test(source)) return "Channels · LinkedIn";
+  if (/Naver|네이버|Blog|블로그/.test(source)) return "Channels · Naver Blog";
+  if (/월간|기간/.test(source)) return "전체 화면 · 기간 기준";
+  if (/중복|매핑|컬럼|열/.test(source)) return "Data Center · 열 매핑";
+  return "AI 브리핑 · KPI 카드";
+}
+
+function getDataIssueAction(issue: DataCenterSnapshot["issues"][number]) {
+  const source = `${issue.title} ${issue.detail}`;
+  if (issue.severity === "info") return "집계 기준만 확인";
+  if (/평균 시청|평균시청/.test(source)) return "다음 업로드 파일에 평균 시청 컬럼 포함";
+  if (/참여율|정의/.test(source)) return "원본 파일 정의와 시스템 지표명 맞추기";
+  if (/중복/.test(source)) return "같은 기간 파일 중복 여부 확인";
+  if (/미등록|누락/.test(source)) return "누락 컬럼 업로드 또는 API 권한 확인";
+  return "원본 파일과 매핑 규칙 점검";
+}
+
 function DataCenter({
   data,
   importing,
@@ -3787,9 +3807,15 @@ function DataCenter({
               <div>
                 <strong>{issue.title}</strong>
                 <span>{issue.detail}</span>
-                <div className="issue-actions">
-                  <button>영향 화면 보기</button>
-                  <button>{issue.severity === "info" ? "정의 확인" : "해결하기"}</button>
+                <div className="issue-meta">
+                  <span>
+                    <b>영향</b>
+                    {getDataIssueImpact(issue)}
+                  </span>
+                  <span>
+                    <b>{issue.severity === "info" ? "확인" : "조치"}</b>
+                    {getDataIssueAction(issue)}
+                  </span>
                 </div>
               </div>
             </div>
