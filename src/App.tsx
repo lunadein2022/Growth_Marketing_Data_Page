@@ -321,6 +321,10 @@ function buildDataFileImportResult(files: File[]): DataFileImportResult {
   };
 }
 
+function isParsedPostRecord(item: ParsedFileImportItem) {
+  return item.type === "PostRecord";
+}
+
 function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImportResult): DataCenterSnapshot {
   const importedChannels = new Set<FileImportChannel>(result.items.map((item) => item.channel));
   const summary = (Object.entries(result.channelCounts) as Array<[FileImportChannel, number]>)
@@ -345,14 +349,14 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
         ...source,
         status: "complete",
         lastSync: result.importedAt,
-        detail: `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 파싱 완료 · 콘텐츠/성과 반영`,
+        detail: `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 저장 · 지표 소스 갱신`,
       };
     }),
     issues: [
       {
         severity: "info",
-        title: "파일 파싱 완료",
-        detail: `${result.totalFiles}개 파일을 파싱해 ${summary || "파일 업로드 채널"} 데이터에 반영했습니다. 원본 파일명은 저장하지 않고 콘텐츠/성과 레코드로 매핑합니다.`,
+        title: "파일 저장 완료",
+        detail: `${result.totalFiles}개 파일을 ${summary || "파일 업로드 채널"} 데이터 소스로 저장했습니다. 콘텐츠 리스트에는 게시물 단위로 파싱된 레코드만 추가합니다.`,
       },
       ...data.issues,
     ],
@@ -369,7 +373,7 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
         transform:
           item.channel === "naver"
             ? "조회수·유입분석·순방문자수·방문 횟수·평균 사용 시간·재방문율"
-            : "파일 파싱 → 콘텐츠 성과 반영",
+            : "파일 저장 → 게시물 단위 파서 대기",
       })),
       ...data.mappingRows,
     ],
@@ -377,7 +381,10 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
 }
 
 function applyImportToContentLab(data: ContentLabSnapshot, result: DataFileImportResult): ContentLabSnapshot {
-  const nextItems: ContentItem[] = result.items.map((item) => ({
+  const postRecords = result.items.filter(isParsedPostRecord);
+  if (!postRecords.length) return data;
+
+  const nextItems: ContentItem[] = postRecords.map((item) => ({
     id: item.id,
     title: item.title,
     channel: item.channel,
@@ -387,7 +394,7 @@ function applyImportToContentLab(data: ContentLabSnapshot, result: DataFileImpor
     publishDate: formatShortDate(TODAY),
     metricLabel: item.metricLabel,
     metricValue: item.metricValue,
-    performanceSource: "파일 업로드 파싱",
+    performanceSource: "파일 업로드 게시물 파싱",
     decisionLogs: [`${result.importedAt} · 파일 업로드에서 자동 파싱되어 성과 데이터에 반영`],
   }));
 
@@ -404,7 +411,8 @@ function applyImportToChannels(channels: ChannelView[], result: DataFileImportRe
     const imported = result.items.filter((item) => item.channel === channel.id);
     if (!imported.length) return channel;
 
-    const importedContent: ContentItem[] = imported.map((item) => ({
+    const postRecords = imported.filter(isParsedPostRecord);
+    const importedContent: ContentItem[] = postRecords.map((item) => ({
       id: item.id,
       title: item.title,
       channel: item.channel,
@@ -414,15 +422,17 @@ function applyImportToChannels(channels: ChannelView[], result: DataFileImportRe
       publishDate: formatShortDate(TODAY),
       metricLabel: item.metricLabel,
       metricValue: item.metricValue,
-      performanceSource: "파일 업로드 파싱",
+      performanceSource: "파일 업로드 게시물 파싱",
     }));
 
     return {
       ...channel,
       updatedAt: `${result.importedAt} 갱신`,
-      source: `${channel.source} + 파일 업로드`,
-      topContent: [...importedContent, ...channel.topContent],
-      dataNote: `${channel.dataNote} 파일 업로드 ${imported.length}건이 파싱되어 현재 성과 목록에 반영되었습니다.`,
+      source: channel.source.includes("파일 업로드") ? channel.source : `${channel.source} + 파일 업로드`,
+      topContent: importedContent.length ? [...importedContent, ...channel.topContent] : channel.topContent,
+      dataNote: importedContent.length
+        ? `${channel.dataNote} 파일 업로드 ${importedContent.length}건이 게시물 단위로 파싱되어 현재 성과 목록에 반영되었습니다.`
+        : `${channel.dataNote} 파일 업로드 ${imported.length}건은 데이터 소스로 저장했고, 콘텐츠 리스트에는 게시물 단위 파싱 결과만 반영합니다.`,
     };
   });
 }
@@ -3835,7 +3845,7 @@ function DataCenter({
             </div>
           </div>
           <span className="source-kind">CSV / TSV / XLSX</span>
-          <p>파일을 넣으면 채널을 추정하고, 콘텐츠 성과 데이터로 파싱한 뒤 화면 데이터를 자동 갱신합니다.</p>
+          <p>파일을 넣으면 데이터 소스로 저장합니다. 콘텐츠 리스트에는 게시물 단위로 추출된 행만 추가됩니다.</p>
           <div className={firebaseUser ? "firebase-import-auth connected" : "firebase-import-auth"}>
             <span>{firebaseUser ? `${firebaseUser.email ?? "로그인 사용자"} 연결됨` : "Firebase 저장은 Google 로그인 필요"}</span>
             {firebaseUser ? (
@@ -3867,8 +3877,8 @@ function DataCenter({
           {importing ? (
             <div className="file-import-status processing">
               <Loader2 size={16} className="spin" />
-              <strong>저장 및 파싱 중</strong>
-              <span>Firebase Storage 저장 · Firestore 기록 · 채널 매핑</span>
+              <strong>저장 및 분류 중</strong>
+              <span>Firebase Storage 저장 · Firestore 기록 · 데이터 소스 매핑</span>
             </div>
           ) : importError ? (
             <div className="file-import-status warning">
@@ -3879,8 +3889,8 @@ function DataCenter({
           ) : importResult ? (
             <div className="file-import-status complete">
               <Check size={16} />
-              <strong>{importResult.totalFiles}개 파일 파싱 완료</strong>
-              <span>{importResult.importedAt} 데이터 새로고침 완료</span>
+              <strong>{importResult.totalFiles}개 파일 저장 완료</strong>
+              <span>{importResult.importedAt} 데이터 소스 갱신 완료</span>
               {importPersistence && (
                 <span className={`firebase-persistence ${importPersistence.status}`}>
                   {importPersistence.message}
@@ -3897,7 +3907,7 @@ function DataCenter({
               </div>
             </div>
           ) : (
-            <small>파일명 목록 대신 파싱 결과가 Data Center와 채널 성과에 바로 반영됩니다.</small>
+            <small>월간 리포트 파일은 콘텐츠 행으로 넣지 않고, 지표 소스로만 저장합니다.</small>
           )}
         </div>
       </section>
