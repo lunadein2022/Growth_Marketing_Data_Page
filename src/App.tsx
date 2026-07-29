@@ -569,7 +569,7 @@ const naverDetailTabs: Array<{ id: NaverDetailTab; label: string }> = [
 
 const naverRequiredMetrics = [
   { label: "조회수", value: "5,400", delta: "+10%", note: "월간 전체 조회 합계" },
-  { label: "유입분석", value: "검색 54%", delta: "+13%", note: "검색·외부·직접 유입 분해" },
+  { label: "유입분석", value: "54%", delta: "+13%", note: "검색 유입 비중 · 외부/직접 분해" },
   { label: "순방문자수", value: "3,860", delta: "+8%", note: "중복 방문자를 제거한 사용자" },
   { label: "방문 횟수", value: "4,920", delta: "+9%", note: "반복 방문을 포함한 세션" },
   { label: "평균 사용 시간", value: "1:42", delta: "+6%", note: "방문당 평균 체류" },
