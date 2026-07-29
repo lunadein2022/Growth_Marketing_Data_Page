@@ -78,6 +78,11 @@ type ParsedFile = {
   rows: string[][];
   flatText: string;
   warnings: string[];
+  dataName?: string;
+  periodKey?: string;
+  periodLabel?: string;
+  rangeStartKey?: string;
+  rangeEndKey?: string;
 };
 
 const requiredDefs: Array<{
@@ -138,12 +143,12 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
 
   const parsedFiles = await Promise.all(naverFiles.map(readFileRows));
   const period = inferPeriod(parsedFiles);
-  const trafficSources = buildTrafficSources(parsedFiles);
-  const metricSnapshot = buildMetricSnapshot(parsedFiles, trafficSources);
-  const requiredMetrics = buildRequiredMetrics(parsedFiles, metricSnapshot);
-  const distributionRows = buildDistributionRows(parsedFiles);
-  const rankingRows = buildRankingRows(parsedFiles);
-  const validationRows = buildValidationRows(parsedFiles, requiredMetrics);
+  const trafficSources = buildTrafficSources(parsedFiles, period.periodKey);
+  const metricSnapshot = buildMetricSnapshot(parsedFiles, trafficSources, period.periodKey);
+  const requiredMetrics = buildRequiredMetrics(parsedFiles, metricSnapshot, period.periodKey);
+  const distributionRows = buildDistributionRows(parsedFiles, period.periodKey);
+  const rankingRows = buildRankingRows(parsedFiles, period.periodKey);
+  const validationRows = buildValidationRows(parsedFiles, requiredMetrics, period.periodKey);
   const missingRequired = validationRows
     .filter((row) => row.type === "필수" && row.status !== "complete")
     .map((row) => row.label);
@@ -165,9 +170,10 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
     rankingRows,
     validationRows,
     metricSnapshot,
-    metricTimeSeries: buildMetricTimeSeries(metricSnapshot),
+    metricTimeSeries: buildMetricTimeSeries(parsedFiles, metricSnapshot, period.periodKey),
     parseWarnings: [
       ...fileWarnings,
+      ...buildPeriodMismatchWarnings(parsedFiles, period.periodKey),
       ...(missingRequired.length ? [`필수 지표 미수집: ${missingRequired.join(", ")}`] : []),
       ...(partialOptional.length ? [`선택 파일 데이터 행 없음: ${partialOptional.join(", ")}`] : []),
     ],
@@ -183,11 +189,15 @@ async function readFileRows(file: File): Promise<ParsedFile> {
         ? await parseLegacyXlsLikeFile(file)
         : { rows: parseDelimited(await file.text(), extension === ".tsv" ? "\t" : ","), warnings: [] };
 
+  const rows = parsed.rows.filter((row) => row.some(Boolean));
+  const metadata = extractFileMetadata(file.name, rows);
+
   return {
     fileName: file.name,
-    rows: parsed.rows.filter((row) => row.some(Boolean)),
-    flatText: `${file.name} ${parsed.rows.flat().join(" ")}`,
+    rows,
+    flatText: `${file.name} ${rows.flat().join(" ")}`,
     warnings: parsed.warnings,
+    ...metadata,
   };
 }
 
@@ -321,6 +331,62 @@ function cellToText(cell: unknown) {
   return String(cell).trim();
 }
 
+function extractFileMetadata(fileName: string, rows: string[][]) {
+  const dataName = findMetadataValue(rows, "데이터명");
+  const periodText = findMetadataValue(rows, "데이터 기간") ?? fileName;
+  const monthKeys = extractMonthKeys(periodText);
+
+  if (monthKeys.length >= 2) {
+    return {
+      dataName,
+      rangeStartKey: monthKeys[0],
+      rangeEndKey: monthKeys[monthKeys.length - 1],
+      periodLabel: `${formatMonthLabel(monthKeys[0])} - ${formatMonthLabel(monthKeys[monthKeys.length - 1])}`,
+    };
+  }
+
+  const periodKey = monthKeys[0];
+  return {
+    dataName,
+    ...(periodKey
+      ? {
+          periodKey,
+          periodLabel: formatMonthLabel(periodKey),
+        }
+      : {}),
+  };
+}
+
+function findMetadataValue(rows: string[][], label: string) {
+  return rows.find((row) => rowHas([row[0] ?? ""], [label]))?.[1];
+}
+
+function extractMonthKeys(text: string) {
+  const keys = new Set<string>();
+  const datePattern = /(20\d{2})[-._년\s]+(\d{1,2})[-._월\s]+(\d{1,2})?/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = datePattern.exec(text)) !== null) {
+    keys.add(`${match[1]}-${String(Number(match[2])).padStart(2, "0")}`);
+  }
+
+  return Array.from(keys);
+}
+
+function formatMonthLabel(periodKey: string) {
+  const [year, month] = periodKey.split("-");
+  return `${year}년 ${Number(month)}월`;
+}
+
+function fileCoversPeriod(file: ParsedFile, periodKey: string) {
+  if (file.rangeStartKey && file.rangeEndKey) return periodKey >= file.rangeStartKey && periodKey <= file.rangeEndKey;
+  return file.periodKey === periodKey;
+}
+
+function rowPeriodKey(row: string[]) {
+  return extractMonthKeys(row.join(" "))[0];
+}
+
 function normalize(value: string) {
   return value.toLowerCase().replace(/\s+/g, "").replace(/[()[\]{}·:_\-|/]/g, "");
 }
@@ -368,8 +434,19 @@ function parseDuration(text: string) {
   return (hour ? Number(hour[1]) * 3600 : 0) + (minute ? Number(minute[1]) * 60 : 0) + (second ? Number(second[1]) : 0);
 }
 
-function findMetricValue(parsedFiles: ParsedFile[], aliases: string[], mode: "count" | "percent" | "duration") {
+function fileMatchesAliases(file: ParsedFile, aliases: string[]) {
+  return aliases.some((alias) => normalize(`${file.dataName ?? ""} ${file.fileName}`).includes(normalize(alias)));
+}
+
+function findMetricValue(parsedFiles: ParsedFile[], aliases: string[], mode: "count" | "percent" | "duration", periodKey: string) {
   for (const file of parsedFiles) {
+    if (!fileCoversPeriod(file, periodKey)) continue;
+
+    if (fileMatchesAliases(file, aliases)) {
+      const ranged = findPeriodRowValue(file, periodKey, mode);
+      if (ranged.value !== null) return ranged;
+    }
+
     for (const row of file.rows) {
       if (!rowHas(row, aliases)) continue;
       if (/순위|랭킹|ranking|rank/i.test(row.join(" "))) continue;
@@ -383,21 +460,35 @@ function findMetricValue(parsedFiles: ParsedFile[], aliases: string[], mode: "co
   return { value: null, sourceFileName: undefined };
 }
 
-function buildMetricSnapshot(parsedFiles: ParsedFile[], trafficSources: NaverTrafficSource[]): NaverMetricSnapshot {
+function findPeriodRowValue(file: ParsedFile, periodKey: string, mode: "count" | "percent" | "duration") {
+  for (const row of file.rows) {
+    if (rowPeriodKey(row) !== periodKey) continue;
+    const value = row
+      .slice(1)
+      .map((cell) => parseNumber(cell, mode))
+      .find((number): number is number => number !== null);
+    if (value !== undefined) return { value, sourceFileName: file.fileName };
+  }
+
+  return { value: null, sourceFileName: undefined };
+}
+
+function buildMetricSnapshot(parsedFiles: ParsedFile[], trafficSources: NaverTrafficSource[], periodKey: string): NaverMetricSnapshot {
   const entries = Object.fromEntries(
-    requiredDefs.map((def) => [def.key, findMetricValue(parsedFiles, def.aliases, def.format).value]),
+    requiredDefs.map((def) => [def.key, findMetricValue(parsedFiles, def.aliases, def.format, periodKey).value]),
   ) as NaverMetricSnapshot;
 
   if (entries.trafficSearchShare === null) {
-    entries.trafficSearchShare = trafficSources.find((source) => source.label === "검색 유입")?.share ?? null;
+    const searchSource = trafficSources.find((source) => source.label === "검색 유입");
+    entries.trafficSearchShare = searchSource?.status === "complete" ? searchSource.share : null;
   }
 
   return entries;
 }
 
-function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSnapshot): NaverRequiredMetric[] {
+function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSnapshot, periodKey: string): NaverRequiredMetric[] {
   return requiredDefs.map((def) => {
-    const found = findMetricValue(parsedFiles, def.aliases, def.format);
+    const found = findMetricValue(parsedFiles, def.aliases, def.format, periodKey);
     const rawValue = snapshot[def.key];
     const detectedFile = rawValue !== null ? found.sourceFileName ?? fileOrRowHas(parsedFiles, def.aliases)?.fileName : undefined;
 
@@ -414,11 +505,11 @@ function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSn
   });
 }
 
-function buildTrafficSources(parsedFiles: ParsedFile[]): NaverTrafficSource[] {
+function buildTrafficSources(parsedFiles: ParsedFile[], periodKey: string): NaverTrafficSource[] {
   const routeShares = new Map<string, number>();
 
   parsedFiles
-    .filter((file) => rowHas([file.fileName, file.flatText], ["유입분석"]))
+    .filter((file) => fileCoversPeriod(file, periodKey) && rowHas([file.fileName, file.dataName ?? ""], ["유입분석"]))
     .forEach((file) => {
       file.rows.forEach((row) => {
         const route = row[0]?.trim();
@@ -471,11 +562,15 @@ function findRows(parsedFiles: ParsedFile[], aliases: string[]) {
   return parsedFiles.flatMap((file) => file.rows.filter((row) => rowHas(row, aliases)).map((row) => ({ file, row })));
 }
 
-function buildDistributionRows(parsedFiles: ParsedFile[]): NaverDistributionRow[] {
+function buildDistributionRows(parsedFiles: ParsedFile[], periodKey: string): NaverDistributionRow[] {
   return parsedFiles
+    .filter((file) => fileCoversPeriod(file, periodKey))
     .flatMap((file) => {
       if (rowHas([file.fileName], ["국가별분포"])) {
-        return file.rows.slice(findHeaderIndex(file.rows, ["국가명", "비율"]) + 1).map((row) => ({
+        const headerIndex = findHeaderIndex(file.rows, ["국가명", "비율"]);
+        if (headerIndex < 0) return [];
+
+        return file.rows.slice(headerIndex + 1).map((row) => ({
           label: row[1] ?? row[0],
           percent: parseNumber(row[3] ?? "", "percent"),
           detail: "국가별 분포",
@@ -483,7 +578,10 @@ function buildDistributionRows(parsedFiles: ParsedFile[]): NaverDistributionRow[
       }
 
       if (rowHas([file.fileName], ["성연령별분포"])) {
-        return file.rows.slice(findHeaderIndex(file.rows, ["연령별", "성별", "비율"]) + 1).map((row) => ({
+        const headerIndex = findHeaderIndex(file.rows, ["연령별", "성별", "비율"]);
+        if (headerIndex < 0) return [];
+
+        return file.rows.slice(headerIndex + 1).map((row) => ({
           label: `${row[0] ?? ""} ${row[1] ?? ""}`.trim(),
           percent: parseNumber(row[3] ?? "", "percent"),
           detail: "성/연령별 분포",
@@ -504,7 +602,7 @@ function buildDistributionRows(parsedFiles: ParsedFile[]): NaverDistributionRow[
     .slice(0, 6);
 }
 
-function buildRankingRows(parsedFiles: ParsedFile[]): NaverRankingRow[] {
+function buildRankingRows(parsedFiles: ParsedFile[], periodKey: string): NaverRankingRow[] {
   const rankDefs = [
     { metric: "조회수 순위", aliases: ["조회수순위", "조회수 순위"] },
     { metric: "공감수 순위", aliases: ["공감수순위", "공감수 순위", "공감"] },
@@ -513,7 +611,9 @@ function buildRankingRows(parsedFiles: ParsedFile[]): NaverRankingRow[] {
 
   return rankDefs
     .map((def) => {
-      const candidateFiles = parsedFiles.filter((file) => def.aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))));
+      const candidateFiles = parsedFiles.filter(
+        (file) => fileCoversPeriod(file, periodKey) && def.aliases.some((alias) => normalize(`${file.dataName ?? ""} ${file.fileName}`).includes(normalize(alias))),
+      );
       const matched = candidateFiles
         .flatMap((file) => {
           const headerIndex = findHeaderIndex(file.rows, ["순위", "제목"]);
@@ -537,7 +637,7 @@ function findHeaderIndex(rows: string[][], aliases: string[]) {
   return rows.findIndex((row) => aliases.every((alias) => rowHas(row, [alias])));
 }
 
-function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRequiredMetric[]): NaverValidationRow[] {
+function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRequiredMetric[], periodKey: string): NaverValidationRow[] {
   return [
     ...requiredDefs.map((def) => {
       const metric = requiredMetrics.find((item) => item.key === def.key);
@@ -549,8 +649,11 @@ function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRe
       };
     }),
     ...optionalDefs.map((def) => {
-      const detected = fileOrRowHas(parsedFiles, def.aliases);
-      const hasDataRows = detected ? hasOptionalDataRows(parsedFiles, def) : false;
+      const candidateFiles = parsedFiles.filter(
+        (file) => fileCoversPeriod(file, periodKey) && def.aliases.some((alias) => normalize(`${file.dataName ?? ""} ${file.fileName}`).includes(normalize(alias))),
+      );
+      const detected = candidateFiles[0];
+      const hasDataRows = detected ? hasOptionalDataRows(candidateFiles, def) : false;
       return {
         label: def.label,
         type: "선택" as const,
@@ -562,7 +665,7 @@ function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRe
 }
 
 function hasOptionalDataRows(parsedFiles: ParsedFile[], def: { label: string; aliases: string[] }) {
-  const candidateFiles = parsedFiles.filter((file) => def.aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))));
+  const candidateFiles = parsedFiles.filter((file) => def.aliases.some((alias) => normalize(`${file.dataName ?? ""} ${file.fileName}`).includes(normalize(alias))));
 
   if (def.label.includes("순위")) {
     return candidateFiles.some((file) => {
@@ -593,31 +696,78 @@ function detectedRows(files: ParsedFile[]) {
 }
 
 function inferPeriod(parsedFiles: ParsedFile[]) {
-  const allText = parsedFiles.map((file) => file.flatText).join(" ");
-  const date = allText.match(/(20\d{2})[.\-_\s년]*(\d{1,2})[.\-_\s월]*(\d{1,2})?/);
+  const periodKeys = parsedFiles
+    .map((file) => file.rangeEndKey ?? file.periodKey)
+    .filter((key): key is string => Boolean(key))
+    .sort();
   const now = new Date();
-  const year = date ? Number(date[1]) : now.getFullYear();
-  const month = date ? Number(date[2]) : now.getMonth() + 1;
+  const fallbackKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const periodKey = periodKeys[periodKeys.length - 1] ?? fallbackKey;
 
   return {
-    periodKey: `${year}-${String(month).padStart(2, "0")}`,
-    periodLabel: `${year}년 ${month}월`,
+    periodKey,
+    periodLabel: formatMonthLabel(periodKey),
   };
 }
 
-function buildMetricTimeSeries(snapshot: NaverMetricSnapshot): Partial<Record<NaverRequiredMetricKey, TrendPoint[]>> {
+function buildPeriodMismatchWarnings(parsedFiles: ParsedFile[], periodKey: string) {
+  const ignored = parsedFiles
+    .filter((file) => file.periodKey && !fileCoversPeriod(file, periodKey))
+    .map((file) => `${file.fileName}${file.periodLabel ? `(${file.periodLabel})` : ""}`);
+
+  if (!ignored.length) return [];
+
+  return [
+    `기준 월 ${formatMonthLabel(periodKey)}과 다른 단월 파일 제외: ${ignored.slice(0, 4).join(", ")}${ignored.length > 4 ? ` 외 ${ignored.length - 4}개` : ""}`,
+  ];
+}
+
+function buildMetricTimeSeries(
+  parsedFiles: ParsedFile[],
+  snapshot: NaverMetricSnapshot,
+  periodKey: string,
+): Partial<Record<NaverRequiredMetricKey, TrendPoint[]>> {
+  const seriesEntries = requiredDefs
+    .map((def) => {
+      const file = parsedFiles.find(
+        (item) => item.rangeStartKey && item.rangeEndKey && fileMatchesAliases(item, def.aliases) && fileCoversPeriod(item, periodKey),
+      );
+      if (!file) return null;
+
+      const points = file.rows
+        .map((row) => {
+          const key = rowPeriodKey(row);
+          const value = row
+            .slice(1)
+            .map((cell) => parseNumber(cell, def.format))
+            .find((number): number is number => number !== null);
+          return key && value !== undefined ? { key, point: { label: key.replace("-", "."), value } } : null;
+        })
+        .filter((item): item is { key: string; point: TrendPoint } => Boolean(item))
+        .filter((item) => item.key <= periodKey)
+        .sort((a, b) => a.key.localeCompare(b.key))
+        .slice(-6)
+        .map((item) => item.point);
+
+      return points.length ? ([def.key, points] as const) : null;
+    })
+    .filter((entry): entry is readonly [NaverRequiredMetricKey, TrendPoint[]] => Boolean(entry));
+
   const days = ["1주", "2주", "3주", "4주"];
-  return Object.fromEntries(
-    Object.entries(snapshot)
-      .filter(([, value]) => typeof value === "number" && value > 0)
-      .map(([key, value]) => [
-        key,
-        days.map((label, index) => ({
-          label,
-          value: Math.max(1, Math.round((value as number) * (0.72 + index * 0.09))),
-        })),
-      ]),
-  );
+  const syntheticEntries = Object.entries(snapshot)
+    .filter(([key, value]) => typeof value === "number" && value > 0 && !seriesEntries.some(([seriesKey]) => seriesKey === key))
+    .map(([key, value]) => [
+      key,
+      days.map((label, index) => ({
+        label,
+        value: Math.max(1, Math.round((value as number) * (0.72 + index * 0.09))),
+      })),
+    ]);
+
+  return Object.fromEntries([
+    ...seriesEntries,
+    ...syntheticEntries,
+  ]) as Partial<Record<NaverRequiredMetricKey, TrendPoint[]>>;
 }
 
 function formatMetricValue(value: number | null, format: "count" | "percent" | "duration") {
