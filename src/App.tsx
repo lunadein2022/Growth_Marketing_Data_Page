@@ -129,7 +129,7 @@ const PAGE_SIZE = 10;
 const CHANNEL_ORDER_STORAGE_KEY = "dummdumm-channel-order";
 const TODAY = new Date(2026, 6, 29);
 const WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
-const FILE_IMPORT_EXTENSIONS = [".xlsx", ".csv", ".tsv"];
+const FILE_IMPORT_EXTENSIONS = [".xlsx", ".xls", ".csv", ".tsv"];
 
 const statusLabel: Record<DataStatus, string> = {
   complete: "정상",
@@ -3847,7 +3847,7 @@ function DataCenter({
     );
 
     if (!acceptedFiles.length) {
-      setImportError("CSV, TSV, XLSX 파일만 업로드할 수 있습니다.");
+      setImportError("CSV, TSV, XLS, XLSX 파일만 업로드할 수 있습니다.");
       return;
     }
 
@@ -3932,7 +3932,7 @@ function DataCenter({
               <p>LinkedIn · TikTok · Naver Blog</p>
             </div>
           </div>
-          <span className="source-kind">CSV / TSV / XLSX</span>
+          <span className="source-kind">CSV / TSV / XLS / XLSX</span>
           <p>파일을 넣으면 데이터 소스로 저장합니다. 콘텐츠 리스트에는 게시물 단위로 추출된 행만 추가됩니다.</p>
           <div className={firebaseUser ? "firebase-import-auth connected" : "firebase-import-auth"}>
             <span>{firebaseUser ? `${firebaseUser.email ?? "로그인 사용자"} 연결됨` : "Firebase 저장은 Google 로그인 필요"}</span>

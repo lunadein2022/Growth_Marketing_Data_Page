@@ -77,6 +77,7 @@ type ParsedFile = {
   fileName: string;
   rows: string[][];
   flatText: string;
+  warnings: string[];
 };
 
 const requiredDefs: Array<{
@@ -146,6 +147,7 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
   const missingRequired = validationRows
     .filter((row) => row.type === "필수" && row.status !== "complete")
     .map((row) => row.label);
+  const fileWarnings = parsedFiles.flatMap((file) => file.warnings);
 
   return {
     id: `naver-monthly-${period.periodKey}`,
@@ -161,22 +163,107 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
     validationRows,
     metricSnapshot,
     metricTimeSeries: buildMetricTimeSeries(metricSnapshot),
-    parseWarnings: missingRequired.length ? [`필수 지표 미수집: ${missingRequired.join(", ")}`] : [],
+    parseWarnings: [
+      ...fileWarnings,
+      ...(missingRequired.length ? [`필수 지표 미수집: ${missingRequired.join(", ")}`] : []),
+    ],
   };
 }
 
 async function readFileRows(file: File): Promise<ParsedFile> {
   const extension = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? "";
-  const rows =
+  const parsed =
     extension === ".xlsx"
-      ? (await readSheet(file)).map((row) => row.map(cellToText))
-      : parseDelimited(await file.text(), extension === ".tsv" ? "\t" : ",");
+      ? { rows: (await readSheet(file)).map((row) => row.map(cellToText)), warnings: [] }
+      : extension === ".xls"
+        ? await parseLegacyXlsLikeFile(file)
+        : { rows: parseDelimited(await file.text(), extension === ".tsv" ? "\t" : ","), warnings: [] };
 
   return {
     fileName: file.name,
-    rows: rows.filter((row) => row.some(Boolean)),
-    flatText: `${file.name} ${rows.flat().join(" ")}`,
+    rows: parsed.rows.filter((row) => row.some(Boolean)),
+    flatText: `${file.name} ${parsed.rows.flat().join(" ")}`,
+    warnings: parsed.warnings,
   };
+}
+
+async function parseLegacyXlsLikeFile(file: File): Promise<{ rows: string[][]; warnings: string[] }> {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer.slice(0, 8));
+  const isOleBinary =
+    bytes[0] === 0xd0 &&
+    bytes[1] === 0xcf &&
+    bytes[2] === 0x11 &&
+    bytes[3] === 0xe0 &&
+    bytes[4] === 0xa1 &&
+    bytes[5] === 0xb1 &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0xe1;
+
+  if (isOleBinary) {
+    return {
+      rows: [],
+      warnings: [
+        `${file.name}은 구형 바이너리 XLS라 브라우저에서 직접 표를 읽지 못했습니다. 파일은 저장했고, XLSX/CSV/TSV 또는 HTML형 XLS는 자동 파싱됩니다.`,
+      ],
+    };
+  }
+
+  const text = decodeSpreadsheetText(buffer);
+  const tableRows = parseHtmlOrXmlTable(text);
+  if (tableRows.length) return { rows: tableRows, warnings: [] };
+
+  const delimiter = text.includes("\t") ? "\t" : ",";
+  const rows = parseDelimited(text, delimiter);
+  return {
+    rows,
+    warnings: rows.length
+      ? []
+      : [`${file.name}에서 표 데이터를 찾지 못했습니다. 파일은 저장했지만 네이버 지표에는 반영하지 않았습니다.`],
+  };
+}
+
+function decodeSpreadsheetText(buffer: ArrayBuffer) {
+  const utf8 = new TextDecoder("utf-8").decode(buffer);
+
+  try {
+    const eucKr = new TextDecoder("euc-kr").decode(buffer);
+    return countReplacementChars(eucKr) < countReplacementChars(utf8) ? eucKr : utf8;
+  } catch {
+    return utf8;
+  }
+}
+
+function countReplacementChars(value: string) {
+  return (value.match(/\uFFFD/g) ?? []).length;
+}
+
+function parseHtmlOrXmlTable(text: string) {
+  if (/<Workbook|<ss:Workbook|<Worksheet|<Table/i.test(text)) {
+    const rows = parseSpreadsheetXmlRows(text);
+    if (rows.length) return rows;
+  }
+
+  if (!/<table|<tr|<td|<th/i.test(text)) return [];
+
+  const document = new DOMParser().parseFromString(text, "text/html");
+  return Array.from(document.querySelectorAll("tr"))
+    .map((row) => Array.from(row.querySelectorAll("th,td")).map((cell) => cell.textContent?.trim() ?? ""))
+    .filter((row) => row.some(Boolean));
+}
+
+function parseSpreadsheetXmlRows(text: string) {
+  const document = new DOMParser().parseFromString(text, "text/xml");
+  const rows = Array.from(document.getElementsByTagName("Row"));
+
+  return rows
+    .map((row) =>
+      Array.from(row.getElementsByTagName("Cell")).map((cell) => {
+        const data = cell.getElementsByTagName("Data")[0];
+        return (data?.textContent ?? cell.textContent ?? "").trim();
+      }),
+    )
+    .filter((row) => row.some(Boolean));
 }
 
 function parseDelimited(text: string, delimiter: "," | "\t") {
