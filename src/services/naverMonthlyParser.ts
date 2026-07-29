@@ -147,6 +147,9 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
   const missingRequired = validationRows
     .filter((row) => row.type === "필수" && row.status !== "complete")
     .map((row) => row.label);
+  const partialOptional = validationRows
+    .filter((row) => row.type === "선택" && row.status === "partial")
+    .map((row) => row.label);
   const fileWarnings = parsedFiles.flatMap((file) => file.warnings);
 
   return {
@@ -166,6 +169,7 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
     parseWarnings: [
       ...fileWarnings,
       ...(missingRequired.length ? [`필수 지표 미수집: ${missingRequired.join(", ")}`] : []),
+      ...(partialOptional.length ? [`선택 파일 데이터 행 없음: ${partialOptional.join(", ")}`] : []),
     ],
   };
 }
@@ -338,7 +342,7 @@ function parseNumber(text: string, mode: "count" | "percent" | "duration" = "cou
     if (duration !== null) return duration;
   }
 
-  if (/20\d{2}[-./년\s]?\d{1,2}[-./월\s]?\d{0,2}/.test(trimmed) && !trimmed.includes("%")) return null;
+  if (/20\d{2}[-./년\s]*\d{1,2}[-./월\s]*\d{0,2}/.test(trimmed) && !trimmed.includes("%")) return null;
 
   if (mode === "percent" && !/%|퍼센트|비율|율/.test(trimmed)) {
     const plain = trimmed.replace(/,/g, "").match(/[+-]?\d+(?:\.\d+)?/);
@@ -395,7 +399,7 @@ function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSn
   return requiredDefs.map((def) => {
     const found = findMetricValue(parsedFiles, def.aliases, def.format);
     const rawValue = snapshot[def.key];
-    const detectedFile = found.sourceFileName ?? fileOrRowHas(parsedFiles, def.aliases)?.fileName;
+    const detectedFile = rawValue !== null ? found.sourceFileName ?? fileOrRowHas(parsedFiles, def.aliases)?.fileName : undefined;
 
     return {
       key: def.key,
@@ -404,38 +408,63 @@ function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSn
       rawValue,
       delta: rawValue === null ? "미수집" : "파일값",
       note: def.note,
-      status: rawValue !== null ? "complete" : detectedFile ? "partial" : "not_uploaded",
+      status: rawValue !== null ? "complete" : "not_uploaded",
       ...(detectedFile ? { sourceFileName: detectedFile } : {}),
     };
   });
 }
 
 function buildTrafficSources(parsedFiles: ParsedFile[]): NaverTrafficSource[] {
-  const rows = trafficDefs.map((def) => {
-    const matched = findRows(parsedFiles, def.aliases)[0];
-    if (!matched) return null;
-    const numbers = matched.row
-      .map((cell) => ({ text: cell, value: parseNumber(cell), percent: /%|퍼센트|비율|율/.test(cell) }))
-      .filter((item): item is { text: string; value: number; percent: boolean } => item.value !== null);
-    const share = numbers.find((item) => item.percent)?.value ?? null;
-    const count = numbers.find((item) => !item.percent)?.value ?? null;
-    return { label: def.label, count, share, sourceFileName: matched.file.fileName };
+  const routeShares = new Map<string, number>();
+
+  parsedFiles
+    .filter((file) => rowHas([file.fileName, file.flatText], ["유입분석"]))
+    .forEach((file) => {
+      file.rows.forEach((row) => {
+        const route = row[0]?.trim();
+        const share = parseNumber(row[1] ?? "", "percent");
+        if (
+          !route ||
+          share === null ||
+          rowHas(row, ["유입경로", "상세유입경로", "다운로드 날짜", "데이터 기간", "서비스명", "데이터명", "선택"])
+        ) {
+          return;
+        }
+        if (!routeShares.has(route)) routeShares.set(route, share);
+      });
+    });
+
+  const grouped = trafficDefs.map((def) => ({
+    label: def.label,
+    share: 0,
+    detected: false,
+  }));
+
+  routeShares.forEach((share, route) => {
+    const group = grouped.find((item) => item.label === getTrafficGroupLabel(route));
+    if (!group) return;
+    group.share += share;
+    group.detected = true;
   });
 
-  const collected = rows.filter((row): row is NonNullable<(typeof rows)[number]> => Boolean(row));
-  const total = collected.reduce((sum, row) => sum + (row.count ?? 0), 0);
-
-  return trafficDefs.map((def) => {
-    const row = collected.find((item) => item.label === def.label);
-    const share = row?.share ?? (row?.count && total > 0 ? Math.round((row.count / total) * 100) : 0);
+  return grouped.map((row) => {
+    const share = Math.min(100, Math.max(0, Math.round(row.share)));
     return {
-      label: def.label,
-      value: row?.count ? formatCount(row.count) : share ? `${Math.round(share)}%` : "미수집",
-      share: Math.min(100, Math.max(0, Math.round(share))),
-      delta: row ? "파일값" : "미수집",
-      status: row ? "complete" : "not_uploaded",
+      label: row.label,
+      value: row.detected ? `${share}%` : "미수집",
+      share,
+      delta: row.detected ? "파일값" : "미수집",
+      status: row.detected ? ("complete" as DataStatus) : ("not_uploaded" as DataStatus),
     };
   });
+}
+
+function getTrafficGroupLabel(route: string) {
+  const normalizedRoute = route.toLowerCase();
+  if (/직접|direct/.test(normalizedRoute)) return "직접 유입";
+  if (/검색|google|bing|daum|yahoo/.test(normalizedRoute)) return "검색 유입";
+  if (/기타|etc|네이버\s*블로그|naver\s*blog/.test(normalizedRoute)) return "기타";
+  return "외부 링크";
 }
 
 function findRows(parsedFiles: ParsedFile[], aliases: string[]) {
@@ -443,24 +472,35 @@ function findRows(parsedFiles: ParsedFile[], aliases: string[]) {
 }
 
 function buildDistributionRows(parsedFiles: ParsedFile[]): NaverDistributionRow[] {
-  const candidates = parsedFiles.flatMap((file) =>
-    file.rows
-      .filter((row) => rowHas(row, ["성연령", "성/연령", "연령", "성별", "국가", "대한민국", "미국", "일본", "중국"]))
-      .map((row) => ({ file, row })),
-  );
+  return parsedFiles
+    .flatMap((file) => {
+      if (rowHas([file.fileName], ["국가별분포"])) {
+        return file.rows.slice(findHeaderIndex(file.rows, ["국가명", "비율"]) + 1).map((row) => ({
+          label: row[1] ?? row[0],
+          percent: parseNumber(row[3] ?? "", "percent"),
+          detail: "국가별 분포",
+        }));
+      }
 
-  return candidates
-    .map(({ row }) => {
-      const label = row.find((cell) => /남성|여성|\d{2}\s*[-~]\s*\d{2}|대한민국|한국|미국|일본|중국|국가|연령/.test(cell)) ?? row[0];
-      const percent = row.map((cell) => parseNumber(cell, "percent")).find((value): value is number => value !== null);
-      if (!label || percent === undefined) return null;
+      if (rowHas([file.fileName], ["성연령별분포"])) {
+        return file.rows.slice(findHeaderIndex(file.rows, ["연령별", "성별", "비율"]) + 1).map((row) => ({
+          label: `${row[0] ?? ""} ${row[1] ?? ""}`.trim(),
+          percent: parseNumber(row[3] ?? "", "percent"),
+          detail: "성/연령별 분포",
+        }));
+      }
+
+      return [];
+    })
+    .filter((row) => row.label && row.percent !== null && row.percent > 0)
+    .sort((a, b) => (b.percent ?? 0) - (a.percent ?? 0))
+    .map((row) => {
       return {
-        label: label.replace(/^국가별?\s*/, "").trim(),
-        value: `${Math.round(percent)}%`,
-        detail: /국가|대한민국|한국|미국|일본|중국/.test(label) ? "국가별 분포" : "성/연령별 분포",
+        label: row.label,
+        value: `${Math.round(row.percent ?? 0)}%`,
+        detail: row.detail,
       };
     })
-    .filter((row): row is NaverDistributionRow => Boolean(row))
     .slice(0, 6);
 }
 
@@ -475,25 +515,26 @@ function buildRankingRows(parsedFiles: ParsedFile[]): NaverRankingRow[] {
     .map((def) => {
       const candidateFiles = parsedFiles.filter((file) => def.aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))));
       const matched = candidateFiles
-        .flatMap((file) => file.rows.map((row) => ({ file, row })))
-        .find(({ row }) => row.some((cell) => cell.length > 6));
+        .flatMap((file) => {
+          const headerIndex = findHeaderIndex(file.rows, ["순위", "제목"]);
+          return headerIndex >= 0 ? file.rows.slice(headerIndex + 1).map((row) => ({ file, row })) : [];
+        })
+        .find(({ row }) => row[1] && row[2]);
       if (!matched) return null;
-      const title =
-        matched.row.find(
-          (cell) =>
-            cell.length > 6 &&
-            !rowHas([cell], def.aliases) &&
-            parseNumber(cell) === null &&
-            !/기간|월간|순위|합계|날짜/.test(cell),
-        ) ?? `${def.metric} 파일 연결`;
-      const value = matched.row.map((cell) => parseNumber(cell)).find((number): number is number => number !== null);
+      const rank = parseNumber(matched.row[0] ?? "");
+      const title = matched.row[1] ?? `${def.metric} 파일 연결`;
+      const value = parseNumber(matched.row[2] ?? "");
       return {
         metric: def.metric,
         title,
-        value: value ? `${formatCount(value)}` : "파일값 확인 필요",
+        value: value ? `${rank ? `${formatCount(rank)}위 · ` : ""}${formatCount(value)} ${def.metric.replace(" 순위", "")}` : "파일값 확인 필요",
       };
     })
     .filter((row): row is NaverRankingRow => Boolean(row));
+}
+
+function findHeaderIndex(rows: string[][], aliases: string[]) {
+  return rows.findIndex((row) => aliases.every((alias) => rowHas(row, [alias])));
 }
 
 function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRequiredMetric[]): NaverValidationRow[] {
@@ -509,14 +550,46 @@ function buildValidationRows(parsedFiles: ParsedFile[], requiredMetrics: NaverRe
     }),
     ...optionalDefs.map((def) => {
       const detected = fileOrRowHas(parsedFiles, def.aliases);
+      const hasDataRows = detected ? hasOptionalDataRows(parsedFiles, def) : false;
       return {
         label: def.label,
         type: "선택" as const,
-        status: detected ? ("complete" as DataStatus) : ("not_uploaded" as DataStatus),
+        status: detected ? (hasDataRows ? ("complete" as DataStatus) : ("partial" as DataStatus)) : ("not_uploaded" as DataStatus),
         ...(detected ? { sourceFileName: detected.fileName } : {}),
       };
     }),
   ];
+}
+
+function hasOptionalDataRows(parsedFiles: ParsedFile[], def: { label: string; aliases: string[] }) {
+  const candidateFiles = parsedFiles.filter((file) => def.aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))));
+
+  if (def.label.includes("순위")) {
+    return candidateFiles.some((file) => {
+      const headerIndex = findHeaderIndex(file.rows, ["순위", "제목"]);
+      return headerIndex >= 0 && file.rows.slice(headerIndex + 1).some((row) => row[1] && row[2]);
+    });
+  }
+
+  if (def.label.includes("국가")) {
+    return candidateFiles.some((file) => {
+      const headerIndex = findHeaderIndex(file.rows, ["국가명", "비율"]);
+      return headerIndex >= 0 && file.rows.slice(headerIndex + 1).some((row) => row[1] && row[3]);
+    });
+  }
+
+  if (def.label.includes("성/연령")) {
+    return candidateFiles.some((file) => {
+      const headerIndex = findHeaderIndex(file.rows, ["연령별", "성별", "비율"]);
+      return headerIndex >= 0 && file.rows.slice(headerIndex + 1).some((row) => row[0] && row[1] && row[3]);
+    });
+  }
+
+  return Boolean(detectedRows(candidateFiles).length);
+}
+
+function detectedRows(files: ParsedFile[]) {
+  return files.flatMap((file) => file.rows.filter((row) => row.some(Boolean)));
 }
 
 function inferPeriod(parsedFiles: ParsedFile[]) {

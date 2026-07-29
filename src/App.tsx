@@ -332,6 +332,12 @@ function formatImportedPeriodDate(periodKey: string) {
   return `${Number(month) || TODAY.getMonth() + 1}/${new Date(Number(periodKey.slice(0, 4)) || TODAY.getFullYear(), Number(month) || TODAY.getMonth() + 1, 0).getDate()}`;
 }
 
+function extractRankingMetricValue(value: string) {
+  const afterRank = value.match(/·\s*([\d,]+)/);
+  if (afterRank) return afterRank[1];
+  return value.match(/[\d,]+/)?.[0] ?? value;
+}
+
 function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImportResult): DataCenterSnapshot {
   const importedChannels = new Set<FileImportChannel>(result.items.map((item) => item.channel));
   const naverReport = result.naverMonthlyReport;
@@ -418,7 +424,7 @@ function applyNaverMonthlyReportToChannels(channels: ChannelView[], report: Nave
       campaign: "파일 업로드",
       publishDate: formatImportedPeriodDate(report.periodKey),
       metricLabel: row.metric.replace(" 순위", ""),
-      metricValue: row.value,
+      metricValue: extractRankingMetricValue(row.value),
       performanceSource: `${report.periodLabel} 네이버 순위 파일`,
     }));
 
