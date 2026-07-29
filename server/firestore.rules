@@ -74,6 +74,11 @@ service cloud.firestore {
         allow create, update, delete: if orgAdmin(orgId);
       }
 
+      match /contentRankings/{rankingId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
       match /decisionLogs/{logId} {
         allow read, create, update, delete: if orgMember(orgId);
       }

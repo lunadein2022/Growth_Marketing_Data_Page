@@ -40,6 +40,7 @@ import {
   persistImportedFilesToFirebase,
   type FirebaseImportPersistence,
 } from "./services/firebaseFileImports";
+import { parseNaverMonthlyFiles, type NaverMonthlyReport } from "./services/naverMonthlyParser";
 import type {
   AdContent,
   AiBriefing,
@@ -99,6 +100,7 @@ type DataFileImportResult = {
   totalFiles: number;
   channelCounts: Record<FileImportChannel, number>;
   items: ParsedFileImportItem[];
+  naverMonthlyReport?: NaverMonthlyReport | null;
 };
 type PaginationState<T> = {
   page: number;
@@ -127,7 +129,7 @@ const PAGE_SIZE = 10;
 const CHANNEL_ORDER_STORAGE_KEY = "dummdumm-channel-order";
 const TODAY = new Date(2026, 6, 29);
 const WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
-const FILE_IMPORT_EXTENSIONS = [".xlsx", ".xls", ".csv", ".tsv"];
+const FILE_IMPORT_EXTENSIONS = [".xlsx", ".csv", ".tsv"];
 
 const statusLabel: Record<DataStatus, string> = {
   complete: "정상",
@@ -325,8 +327,16 @@ function isParsedPostRecord(item: ParsedFileImportItem) {
   return item.type === "PostRecord";
 }
 
+function formatImportedPeriodDate(periodKey: string) {
+  const [, month] = periodKey.split("-");
+  return `${Number(month) || TODAY.getMonth() + 1}/${new Date(Number(periodKey.slice(0, 4)) || TODAY.getFullYear(), Number(month) || TODAY.getMonth() + 1, 0).getDate()}`;
+}
+
 function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImportResult): DataCenterSnapshot {
   const importedChannels = new Set<FileImportChannel>(result.items.map((item) => item.channel));
+  const naverReport = result.naverMonthlyReport;
+  const naverCompleteRequired =
+    naverReport?.validationRows.filter((row) => row.type === "필수" && row.status === "complete").length ?? 0;
   const summary = (Object.entries(result.channelCounts) as Array<[FileImportChannel, number]>)
     .filter(([, count]) => count > 0)
     .map(([channel, count]) => `${channelMeta[channel].label} ${count}건`)
@@ -347,12 +357,26 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
 
       return {
         ...source,
-        status: "complete",
+        status: matchedChannel === "naver" && naverReport && naverCompleteRequired < 6 ? "partial" : "complete",
         lastSync: result.importedAt,
-        detail: `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 저장 · 지표 소스 갱신`,
+        detail:
+          matchedChannel === "naver" && naverReport
+            ? `${naverReport.periodLabel} 월간 필수 ${naverCompleteRequired}/6개 파싱 · 선택 ${naverReport.sourceFiles.length}개 파일 확인`
+            : `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 저장 · 지표 소스 갱신`,
       };
     }),
     issues: [
+      ...(naverReport
+        ? [
+            {
+              severity: naverReport.parseWarnings.length ? ("warning" as const) : ("info" as const),
+              title: "네이버 월간 파일 파싱",
+              detail: naverReport.parseWarnings.length
+                ? `${naverReport.periodLabel} · ${naverReport.parseWarnings.join(" · ")}`
+                : `${naverReport.periodLabel} 필수 지표와 선택 파일을 파싱해 네이버 지표 소스에 반영했습니다.`,
+            },
+          ]
+        : []),
       {
         severity: "info",
         title: "파일 저장 완료",
@@ -378,6 +402,46 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
       ...data.mappingRows,
     ],
   };
+}
+
+function applyNaverMonthlyReportToChannels(channels: ChannelView[], report: NaverMonthlyReport | null | undefined) {
+  if (!report) return channels;
+
+  const rankingContent: ContentItem[] = report.rankingRows
+    .filter((row) => !row.title.includes("파일 연결") && !row.title.includes("확인 필요"))
+    .map((row, index) => ({
+      id: `naver-ranking-${report.periodKey}-${index}`,
+      title: row.title,
+      channel: "naver",
+      type: "Blog",
+      status: row.metric,
+      campaign: "파일 업로드",
+      publishDate: formatImportedPeriodDate(report.periodKey),
+      metricLabel: row.metric.replace(" 순위", ""),
+      metricValue: row.value,
+      performanceSource: `${report.periodLabel} 네이버 순위 파일`,
+    }));
+
+  return channels.map((channel) => {
+    if (channel.id !== "naver") return channel;
+
+    return {
+      ...channel,
+      updatedAt: `${report.importedAt} 갱신`,
+      source: "Naver Blog 월간 파일",
+      kpis: report.requiredMetrics.map((item) =>
+        metric(item.label, item.value, item.delta === "파일값" ? "업로드" : item.delta, item.status),
+      ),
+      trend: report.metricTimeSeries.views ?? channel.trend,
+      trendSeries: Object.fromEntries(
+        report.requiredMetrics
+          .map((item) => [item.label, report.metricTimeSeries[item.key]] as const)
+          .filter(([, points]) => Boolean(points)),
+      ),
+      topContent: rankingContent.length ? [...rankingContent, ...channel.topContent] : channel.topContent,
+      dataNote: `${report.periodLabel} 네이버 월간 파일 ${report.sourceFiles.length}개 기준입니다. 파일에서 찾은 값만 완료로 표시합니다.`,
+    };
+  });
 }
 
 function applyImportToContentLab(data: ContentLabSnapshot, result: DataFileImportResult): ContentLabSnapshot {
@@ -596,7 +660,7 @@ const naverRankingRows = [
   { metric: "댓글수 순위", title: "팀 문화 인터뷰", value: "5위 · 24 댓글" },
 ];
 
-const naverFileValidationRows = [
+const naverFileValidationRows: NaverMonthlyReport["validationRows"] = [
   { label: "조회수", type: "필수", status: "complete" as DataStatus },
   { label: "유입분석", type: "필수", status: "complete" as DataStatus },
   { label: "순방문자수", type: "필수", status: "complete" as DataStatus },
@@ -667,6 +731,7 @@ function App() {
   const [importPersistence, setImportPersistence] = useState<FirebaseImportPersistence | null>(null);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseDashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
   const firebaseConfigured = hasFirebaseConfig();
 
   useEffect(() => {
@@ -757,13 +822,24 @@ function App() {
 
     try {
       await new Promise((resolve) => window.setTimeout(resolve, 650));
-      const result = buildDataFileImportResult(files);
+      const baseResult = buildDataFileImportResult(files);
+      let naverParseError = "";
+      const naverReport = await parseNaverMonthlyFiles(files, baseResult.importedAt).catch((error) => {
+        naverParseError = error instanceof Error ? error.message : "네이버 파일 파싱 실패";
+        return null;
+      });
+      const result: DataFileImportResult = { ...baseResult, naverMonthlyReport: naverReport };
       const persistence = await persistImportedFilesToFirebase(files, result, firebaseUser);
+      const nextPersistence =
+        naverParseError && persistence.status === "saved"
+          ? { ...persistence, message: `${persistence.message} · 네이버 파싱 실패: ${naverParseError}` }
+          : persistence;
       setDataCenter((current) => (current ? applyImportToDataCenter(current, result) : current));
       setContentLab((current) => (current ? applyImportToContentLab(current, result) : current));
-      setChannels((current) => applyImportToChannels(current, result));
+      setChannels((current) => applyNaverMonthlyReportToChannels(applyImportToChannels(current, result), naverReport));
+      if (naverReport) setNaverMonthlyReport(naverReport);
       setLastFileImport(result);
-      setImportPersistence(persistence);
+      setImportPersistence(nextPersistence);
     } finally {
       setImportingFiles(false);
     }
@@ -860,6 +936,7 @@ function App() {
                 selectedChannel={selectedChannel}
                 onSelectChannel={setSelectedChannel}
                 channel={selectedChannelView}
+                naverMonthlyReport={naverMonthlyReport}
                 onCompare={() => setCompareOpen(true)}
                 onGenerate={() => handleGenerateBriefing("channel", selectedChannel)}
               />
@@ -1610,6 +1687,7 @@ function ChannelsView({
   selectedChannel,
   onSelectChannel,
   channel,
+  naverMonthlyReport,
   onCompare,
   onGenerate,
 }: {
@@ -1617,6 +1695,7 @@ function ChannelsView({
   selectedChannel: Exclude<ChannelId, "all">;
   onSelectChannel: (channel: Exclude<ChannelId, "all">) => void;
   channel: ChannelView;
+  naverMonthlyReport: NaverMonthlyReport | null;
   onCompare: () => void;
   onGenerate: () => void;
 }) {
@@ -1833,7 +1912,7 @@ function ChannelsView({
       </div>
 
       {channel.id === "youtube" && <YouTubeAiInsightPanel />}
-      {filteredChannel.id === "naver" && <NaverBlogDetailPanel />}
+      {filteredChannel.id === "naver" && <NaverBlogDetailPanel report={naverMonthlyReport} />}
 
       <section className="section-panel">
         <div className="section-header">
@@ -1914,15 +1993,24 @@ function YouTubeAiInsightPanel() {
   );
 }
 
-function NaverBlogDetailPanel() {
+function NaverBlogDetailPanel({ report }: { report: NaverMonthlyReport | null }) {
   const [activeTab, setActiveTab] = useState<NaverDetailTab>("required");
+  const requiredMetrics = report?.requiredMetrics ?? naverRequiredMetrics;
+  const trafficSources = report?.trafficSources ?? naverTrafficSources;
+  const distributionRows = report?.distributionRows.length ? report.distributionRows : naverDistributionRows;
+  const rankingRows = report?.rankingRows.length ? report.rankingRows : naverRankingRows;
+  const validationRows = report?.validationRows ?? naverFileValidationRows;
 
   return (
     <section className="section-panel naver-detail-panel">
       <div className="section-header">
         <div>
           <h2>네이버 월간 파일 상세</h2>
-          <p>필수 항목과 선택 항목을 분리해 월별로 확인합니다.</p>
+          <p>
+            {report
+              ? `${report.periodLabel} · ${report.sourceFiles.length}개 파일 파싱 · ${report.importedAt} 갱신`
+              : "필수 항목과 선택 항목을 분리해 월별로 확인합니다."}
+          </p>
         </div>
         <Segmented
           value={activeTab}
@@ -1933,7 +2021,7 @@ function NaverBlogDetailPanel() {
 
       {activeTab === "required" && (
         <div className="naver-required-grid">
-          {naverRequiredMetrics.map((metric) => (
+          {requiredMetrics.map((metric) => (
             <div className="naver-required-row" key={metric.label}>
               <span>{metric.label}</span>
               <strong>{metric.value}</strong>
@@ -1947,7 +2035,7 @@ function NaverBlogDetailPanel() {
       {activeTab === "traffic" && (
         <div className="naver-drill-grid">
           <div className="naver-bar-list">
-            {naverTrafficSources.map((source) => (
+            {trafficSources.map((source) => (
               <div className="naver-bar-row" key={source.label}>
                 <div>
                   <strong>{source.label}</strong>
@@ -1970,7 +2058,7 @@ function NaverBlogDetailPanel() {
       {activeTab === "segments" && (
         <div className="naver-drill-grid">
           <div className="naver-segment-list">
-            {naverDistributionRows.map((row) => (
+            {distributionRows.map((row) => (
               <div className="naver-segment-row" key={row.label}>
                 <span>{row.label}</span>
                 <strong>{row.value}</strong>
@@ -1979,7 +2067,7 @@ function NaverBlogDetailPanel() {
             ))}
           </div>
           <div className="naver-ranking-list">
-            {naverRankingRows.map((row) => (
+            {rankingRows.map((row) => (
               <div className="naver-ranking-row" key={row.metric}>
                 <span>{row.metric}</span>
                 <strong>{row.title}</strong>
@@ -1992,11 +2080,11 @@ function NaverBlogDetailPanel() {
 
       {activeTab === "validation" && (
         <div className="naver-validation-grid">
-          {naverFileValidationRows.map((row) => (
+          {validationRows.map((row) => (
             <div className="naver-validation-row" key={row.label}>
               <div>
                 <strong>{row.label}</strong>
-                <span>{row.type}</span>
+                <span>{row.sourceFileName ? `${row.type} · ${row.sourceFileName}` : row.type}</span>
               </div>
               <StatusPill status={row.status} />
             </div>
@@ -3759,7 +3847,7 @@ function DataCenter({
     );
 
     if (!acceptedFiles.length) {
-      setImportError("CSV, TSV, XLS, XLSX 파일만 업로드할 수 있습니다.");
+      setImportError("CSV, TSV, XLSX 파일만 업로드할 수 있습니다.");
       return;
     }
 
