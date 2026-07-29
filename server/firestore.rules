@@ -1,0 +1,93 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function memberDoc(orgId) {
+      return /databases/$(database)/documents/orgs/$(orgId)/members/$(request.auth.uid);
+    }
+
+    function orgMember(orgId) {
+      return signedIn() && exists(memberDoc(orgId));
+    }
+
+    function orgAdmin(orgId) {
+      return orgMember(orgId) && get(memberDoc(orgId)).data.role in ['owner', 'admin'];
+    }
+
+    match /orgs/{orgId} {
+      allow read: if orgMember(orgId);
+      allow create, update, delete: if orgAdmin(orgId);
+
+      match /members/{userId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /channelAccounts/{accountId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /contentCards/{contentId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /publishedPosts/{postId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /contentPostLinks/{linkId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /campaigns/{campaignId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /campaignContents/{linkId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /adContents/{adId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /metricSnapshots/{snapshotId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /metricTimeSeries/{pointId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /decisionLogs/{logId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /aiBriefings/{briefingId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /publishingRules/{ruleId} {
+        allow read, create, update, delete: if orgMember(orgId);
+      }
+
+      match /fileImports/{importId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+
+      match /syncRuns/{syncRunId} {
+        allow read: if orgMember(orgId);
+        allow create, update, delete: if orgAdmin(orgId);
+      }
+    }
+  }
+}
