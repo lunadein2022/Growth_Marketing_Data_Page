@@ -367,11 +367,12 @@ export const channels: ChannelView[] = [
     color: channelMeta.naver.color,
     updatedAt: "2026.07.25 10:30",
     source: "CSV 업로드",
-    tabs: ["전체", "방문", "유입", "게시글"],
+    tabs: ["전체", "필수 지표", "유입분석", "분포·순위"],
     kpis: [
       { label: "조회수", value: "5,400", delta: "+10%", status: "partial" },
-      { label: "순방문자", value: "3,860", delta: "+8%", status: "partial" },
-      { label: "평균 사용", value: "1:42", delta: "+6%", status: "complete" },
+      { label: "순방문자수", value: "3,860", delta: "+8%", status: "partial" },
+      { label: "방문 횟수", value: "4,920", delta: "+9%", status: "partial" },
+      { label: "평균 사용 시간", value: "1:42", delta: "+6%", status: "complete" },
       { label: "재방문율", value: "18%", delta: "+2%", status: "complete" },
     ],
     trend: [
@@ -396,7 +397,7 @@ export const channels: ChannelView[] = [
         metricValue: "5,400",
       },
     ],
-    dataNote: "기간 전체 순방문자는 일별 값을 단순 합산하지 않습니다.",
+    dataNote: "월간 파일 필수 항목은 조회수, 유입분석, 순방문자수, 방문 횟수, 평균 사용 시간, 재방문율입니다.",
   },
   {
     id: "tiktok",
@@ -714,7 +715,7 @@ export const dataCenterSnapshot: DataCenterSnapshot = {
       kind: "file",
       status: "partial",
       lastSync: "2026.07.25 10:30",
-      detail: "방문/유입 파일 반영",
+      detail: "월간 필수 지표 파일 반영",
     },
     {
       id: "tiktok-file",
@@ -726,8 +727,12 @@ export const dataCenterSnapshot: DataCenterSnapshot = {
     },
   ],
   mappingRows: [
-    { raw: "방문자 수", metric: "unique_visitors", transform: "숫자", platform: "Naver Blog" },
-    { raw: "평균 이용 시간", metric: "avg_duration_seconds", transform: "시간 → 초", platform: "Naver Blog" },
+    { raw: "조회수", metric: "blog_views", transform: "숫자", platform: "Naver Blog" },
+    { raw: "유입분석", metric: "traffic_sources", transform: "유입원별 분해", platform: "Naver Blog" },
+    { raw: "순방문자수", metric: "unique_visitors", transform: "숫자", platform: "Naver Blog" },
+    { raw: "방문 횟수", metric: "visit_count", transform: "숫자", platform: "Naver Blog" },
+    { raw: "평균 사용 시간", metric: "avg_duration_seconds", transform: "시간 → 초", platform: "Naver Blog" },
+    { raw: "재방문율", metric: "return_visit_rate", transform: "퍼센트", platform: "Naver Blog" },
     { raw: "신규 팔로워 수", metric: "new_followers", transform: "숫자", platform: "LinkedIn" },
     { raw: "동영상 조회수", metric: "video_views", transform: "숫자", platform: "TikTok" },
   ],
@@ -1036,7 +1041,8 @@ export function buildPeriodComparison(
     ],
     naver: [
       ["조회수", "4,910", "5,400", "+10%", "partial"],
-      ["순방문자", "3,560", "3,860", "+8%", "partial"],
+      ["순방문자수", "3,560", "3,860", "+8%", "partial"],
+      ["방문 횟수", "4,510", "4,920", "+9%", "partial"],
       ["평균 사용 시간", "1:36", "1:42", "+6%", "complete"],
       ["재방문율", "17.6%", "18.0%", "+2%", "complete"],
     ],

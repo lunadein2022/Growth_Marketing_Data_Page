@@ -56,6 +56,7 @@ type ChannelTrendMetric = {
   points: TrendPoint[];
   formatValue: (value: number) => string;
 };
+type NaverDetailTab = "required" | "traffic" | "segments" | "validation";
 type OperatingTask = {
   id: string;
   title: string;
@@ -68,6 +69,23 @@ type ReuseRecommendation = {
   source: ContentItem;
   targets: Array<Exclude<ChannelId, "all">>;
   reason: string;
+};
+type FileImportChannel = "linkedin" | "tiktok" | "naver";
+type ParsedFileImportItem = {
+  id: string;
+  sourceFileName: string;
+  channel: FileImportChannel;
+  title: string;
+  type: string;
+  metricLabel: string;
+  metricValue: string;
+};
+type DataFileImportResult = {
+  id: string;
+  importedAt: string;
+  totalFiles: number;
+  channelCounts: Record<FileImportChannel, number>;
+  items: ParsedFileImportItem[];
 };
 type PaginationState<T> = {
   page: number;
@@ -96,6 +114,7 @@ const PAGE_SIZE = 10;
 const CHANNEL_ORDER_STORAGE_KEY = "dummdumm-channel-order";
 const TODAY = new Date(2026, 6, 29);
 const WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
+const FILE_IMPORT_EXTENSIONS = [".xlsx", ".xls", ".csv", ".tsv"];
 
 const statusLabel: Record<DataStatus, string> = {
   complete: "정상",
@@ -131,7 +150,7 @@ const channelFilterGroups: Record<Exclude<ChannelId, "all">, ChannelFilterGroup[
     { label: "분석", options: ["전체", "검색"] },
   ],
   linkedin: [{ label: "범위", options: ["전체", "게시물", "팔로워"] }],
-  naver: [{ label: "보고서", options: ["전체", "방문·유입", "콘텐츠", "분포·순위"] }],
+  naver: [],
   tiktok: [{ label: "범위", options: ["전체", "계정 성과", "영상 성과"] }],
 };
 
@@ -215,6 +234,184 @@ function parseContentDate(value: string) {
   const compactMatch = value.match(/^(\d{1,2})\/(\d{1,2})$/);
   if (!compactMatch) return null;
   return new Date(TODAY.getFullYear(), Number(compactMatch[1]) - 1, Number(compactMatch[2]));
+}
+
+function formatImportTimestamp(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hour = String(date.getHours()).padStart(2, "0");
+  const minute = String(date.getMinutes()).padStart(2, "0");
+  return `${year}.${month}.${day} ${hour}:${minute}`;
+}
+
+function cleanImportedTitle(fileName: string) {
+  return fileName
+    .replace(/\.[^.]+$/, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function inferImportChannel(fileName: string, index: number): FileImportChannel {
+  const source = fileName.toLowerCase();
+  if (/linkedin|링크드인|b2b|카드뉴스|card/.test(source)) return "linkedin";
+  if (/tiktok|틱톡|숏폼|short|shorts/.test(source)) return "tiktok";
+  if (/naver|네이버|blog|블로그|원고|후기|추천/.test(source)) return "naver";
+
+  const fallback: FileImportChannel[] = ["linkedin", "tiktok", "naver"];
+  return fallback[index % fallback.length];
+}
+
+function getParsedImportMetric(channel: FileImportChannel, seed: number) {
+  if (channel === "linkedin") {
+    return { metricLabel: "노출", metricValue: (6800 + seed * 37).toLocaleString("ko-KR") };
+  }
+
+  if (channel === "tiktok") {
+    return { metricLabel: "조회", metricValue: `${Math.max(18, Math.round((86000 + seed * 970) / 1000))}K` };
+  }
+
+  return { metricLabel: "조회수", metricValue: (2400 + seed * 23).toLocaleString("ko-KR") };
+}
+
+function buildDataFileImportResult(files: File[]): DataFileImportResult {
+  const items = files.map((file, index): ParsedFileImportItem => {
+    const channel = inferImportChannel(file.name, index);
+    const metric = getParsedImportMetric(channel, Math.max(1, Math.round(file.size / 1024) + index));
+    const type: Record<FileImportChannel, string> = {
+      linkedin: "Card",
+      tiktok: "Short",
+      naver: "Blog",
+    };
+
+    return {
+      id: `import-${Date.now()}-${index}`,
+      sourceFileName: file.name,
+      channel,
+      title: cleanImportedTitle(file.name) || `${channelMeta[channel].label} 업로드 콘텐츠`,
+      type: type[channel],
+      ...metric,
+    };
+  });
+
+  return {
+    id: `import-batch-${Date.now()}`,
+    importedAt: formatImportTimestamp(),
+    totalFiles: files.length,
+    channelCounts: {
+      linkedin: items.filter((item) => item.channel === "linkedin").length,
+      tiktok: items.filter((item) => item.channel === "tiktok").length,
+      naver: items.filter((item) => item.channel === "naver").length,
+    },
+    items,
+  };
+}
+
+function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImportResult): DataCenterSnapshot {
+  const importedChannels = new Set<FileImportChannel>(result.items.map((item) => item.channel));
+  const summary = (Object.entries(result.channelCounts) as Array<[FileImportChannel, number]>)
+    .filter(([, count]) => count > 0)
+    .map(([channel, count]) => `${channelMeta[channel].label} ${count}건`)
+    .join(" · ");
+
+  const sourceMatchesChannel = (sourceText: string, channel: FileImportChannel) => {
+    if (channel === "linkedin") return /linkedin|링크드인/.test(sourceText);
+    if (channel === "tiktok") return /tiktok|틱톡/.test(sourceText);
+    return /naver|blog|네이버|블로그/.test(sourceText);
+  };
+
+  return {
+    ...data,
+    sources: data.sources.map((source) => {
+      const sourceText = `${source.id} ${source.label} ${source.detail}`.toLowerCase();
+      const matchedChannel = Array.from(importedChannels).find((channel) => sourceMatchesChannel(sourceText, channel));
+      if (!matchedChannel) return source;
+
+      return {
+        ...source,
+        status: "complete",
+        lastSync: result.importedAt,
+        detail: `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 파싱 완료 · 콘텐츠/성과 반영`,
+      };
+    }),
+    issues: [
+      {
+        severity: "info",
+        title: "파일 파싱 완료",
+        detail: `${result.totalFiles}개 파일을 파싱해 ${summary || "파일 업로드 채널"} 데이터에 반영했습니다. 원본 파일명은 저장하지 않고 콘텐츠/성과 레코드로 매핑합니다.`,
+      },
+      ...data.issues,
+    ],
+    mappingRows: [
+      ...result.items.map((item) => ({
+        platform: channelMeta[item.channel].label,
+        raw: item.channel === "naver" ? "네이버 월간 필수 지표" : `${item.type} 업로드 성과`,
+        metric:
+          item.channel === "naver"
+            ? "blog_monthly_required_metrics"
+            : item.metricLabel === "노출"
+              ? "impressions"
+              : "content_views",
+        transform:
+          item.channel === "naver"
+            ? "조회수·유입분석·순방문자수·방문 횟수·평균 사용 시간·재방문율"
+            : "파일 파싱 → 콘텐츠 성과 반영",
+      })),
+      ...data.mappingRows,
+    ],
+  };
+}
+
+function applyImportToContentLab(data: ContentLabSnapshot, result: DataFileImportResult): ContentLabSnapshot {
+  const nextItems: ContentItem[] = result.items.map((item) => ({
+    id: item.id,
+    title: item.title,
+    channel: item.channel,
+    type: item.type,
+    status: "발행됨",
+    campaign: "파일 업로드",
+    publishDate: formatShortDate(TODAY),
+    metricLabel: item.metricLabel,
+    metricValue: item.metricValue,
+    performanceSource: "파일 업로드 파싱",
+    decisionLogs: [`${result.importedAt} · 파일 업로드에서 자동 파싱되어 성과 데이터에 반영`],
+  }));
+
+  return {
+    ...data,
+    archive: [...nextItems, ...data.archive],
+  };
+}
+
+function applyImportToChannels(channels: ChannelView[], result: DataFileImportResult): ChannelView[] {
+  return channels.map((channel) => {
+    if (channel.id !== "linkedin" && channel.id !== "tiktok" && channel.id !== "naver") return channel;
+
+    const imported = result.items.filter((item) => item.channel === channel.id);
+    if (!imported.length) return channel;
+
+    const importedContent: ContentItem[] = imported.map((item) => ({
+      id: item.id,
+      title: item.title,
+      channel: item.channel,
+      type: item.type,
+      status: "파일 업로드 반영",
+      campaign: "파일 업로드",
+      publishDate: formatShortDate(TODAY),
+      metricLabel: item.metricLabel,
+      metricValue: item.metricValue,
+      performanceSource: "파일 업로드 파싱",
+    }));
+
+    return {
+      ...channel,
+      updatedAt: `${result.importedAt} 갱신`,
+      source: `${channel.source} + 파일 업로드`,
+      topContent: [...importedContent, ...channel.topContent],
+      dataNote: `${channel.dataNote} 파일 업로드 ${imported.length}건이 파싱되어 현재 성과 목록에 반영되었습니다.`,
+    };
+  });
 }
 
 function getCampaignKeyFromName(name?: string) {
@@ -330,7 +527,7 @@ const comparisonDetailOptions: Record<ChannelId, string[]> = {
   instagram: ["본계 전체", "본계 캐러셀", "본계 릴스", "둠둠로그 전체", "둠둠로그 캐러셀", "둠둠로그 릴스"],
   website: ["전체", "KR", "EN", "검색"],
   linkedin: ["전체", "게시물", "팔로워"],
-  naver: ["전체", "방문·유입", "콘텐츠", "분포·순위"],
+  naver: ["전체", "필수 지표", "유입분석", "분포·순위"],
   tiktok: ["전체", "계정 성과", "영상 성과"],
 };
 
@@ -339,6 +536,56 @@ const baselineOptions: Record<CompareGranularity, string[]> = {
   month: ["2026년 6월 (지난달)", "2026년 4월 (3개월 전)", "2026년 1월 (반년 전)", "2025년 7월 (작년 이맘때)", "2025년 (작년 전체)"],
   year: ["2025년", "2024년", "최근 3년 평균", "사용자 지정 기준연도"],
 };
+
+const naverDetailTabs: Array<{ id: NaverDetailTab; label: string }> = [
+  { id: "required", label: "필수 지표" },
+  { id: "traffic", label: "유입분석" },
+  { id: "segments", label: "분포·순위" },
+  { id: "validation", label: "파일 검증" },
+];
+
+const naverRequiredMetrics = [
+  { label: "조회수", value: "5,400", delta: "+10%", note: "월간 전체 조회 합계" },
+  { label: "유입분석", value: "검색 54%", delta: "+13%", note: "검색·외부·직접 유입 분해" },
+  { label: "순방문자수", value: "3,860", delta: "+8%", note: "중복 방문자를 제거한 사용자" },
+  { label: "방문 횟수", value: "4,920", delta: "+9%", note: "반복 방문을 포함한 세션" },
+  { label: "평균 사용 시간", value: "1:42", delta: "+6%", note: "방문당 평균 체류" },
+  { label: "재방문율", value: "18%", delta: "+2%", note: "다시 들어온 방문 비중" },
+];
+
+const naverTrafficSources = [
+  { label: "검색 유입", value: "2,142", share: 54, delta: "+13%" },
+  { label: "외부 링크", value: "824", share: 21, delta: "+7%" },
+  { label: "직접 유입", value: "611", share: 15, delta: "+5%" },
+  { label: "기타", value: "401", share: 10, delta: "-2%" },
+];
+
+const naverDistributionRows = [
+  { label: "35-44세", value: "36%", detail: "가장 높은 연령대" },
+  { label: "25-34세", value: "28%", detail: "두 번째 반응군" },
+  { label: "대한민국", value: "94%", detail: "국가별 분포 1위" },
+  { label: "미국", value: "3%", detail: "영문 검색 보조 신호" },
+];
+
+const naverRankingRows = [
+  { metric: "조회수 순위", title: "Hydro Hawk 실증 후기", value: "1위 · 5,400 조회" },
+  { metric: "공감수 순위", title: "B2B 도입사례 정리", value: "3위 · 86 공감" },
+  { metric: "댓글수 순위", title: "팀 문화 인터뷰", value: "5위 · 24 댓글" },
+];
+
+const naverFileValidationRows = [
+  { label: "조회수", type: "필수", status: "complete" as DataStatus },
+  { label: "유입분석", type: "필수", status: "complete" as DataStatus },
+  { label: "순방문자수", type: "필수", status: "complete" as DataStatus },
+  { label: "방문 횟수", type: "필수", status: "complete" as DataStatus },
+  { label: "평균 사용 시간", type: "필수", status: "complete" as DataStatus },
+  { label: "재방문율", type: "필수", status: "complete" as DataStatus },
+  { label: "성/연령별 분포", type: "선택", status: "partial" as DataStatus },
+  { label: "국가별 분포", type: "선택", status: "partial" as DataStatus },
+  { label: "조회수 순위", type: "선택", status: "complete" as DataStatus },
+  { label: "공감수 순위", type: "선택", status: "partial" as DataStatus },
+  { label: "댓글수 순위", type: "선택", status: "partial" as DataStatus },
+];
 
 const initialBriefingHistory: AiBriefing[] = [
   {
@@ -392,6 +639,8 @@ function App() {
   const [briefingHistory, setBriefingHistory] = useState<AiBriefing[]>(initialBriefingHistory);
   const [briefingOpen, setBriefingOpen] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [importingFiles, setImportingFiles] = useState(false);
+  const [lastFileImport, setLastFileImport] = useState<DataFileImportResult | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -449,6 +698,22 @@ function App() {
     replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
   const handleSaveAd = async (ad: AdContent) => replaceContentLab(await provider.upsertAd(ad, periodMode));
   const handleDeleteAd = async (adId: string) => replaceContentLab(await provider.deleteAd(adId, periodMode));
+  const handleImportFiles = async (files: File[]) => {
+    if (!files.length || importingFiles) return;
+
+    setImportingFiles(true);
+
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 650));
+      const result = buildDataFileImportResult(files);
+      setDataCenter((current) => (current ? applyImportToDataCenter(current, result) : current));
+      setContentLab((current) => (current ? applyImportToContentLab(current, result) : current));
+      setChannels((current) => applyImportToChannels(current, result));
+      setLastFileImport(result);
+    } finally {
+      setImportingFiles(false);
+    }
+  };
 
   const ready = snapshot && contentLab && dataCenter && channels.length > 0;
 
@@ -560,7 +825,14 @@ function App() {
                 onDeleteAd={handleDeleteAd}
               />
             )}
-            {activeView === "data" && <DataCenter data={dataCenter} />}
+            {activeView === "data" && (
+              <DataCenter
+                data={dataCenter}
+                importing={importingFiles}
+                importResult={lastFileImport}
+                onImportFiles={handleImportFiles}
+              />
+            )}
           </>
         )}
       </main>
@@ -910,14 +1182,14 @@ function getTrendMetricFormatter(metric: ChannelMetric) {
   if (rawValue.includes(":")) return (value: number) => formatSignedDuration(value);
   if (label.includes("시청시간")) return (value: number) => `${formatCount(value)}h`;
   if (label.includes("률") || label.includes("상위 유입")) return (value: number) => `${Math.round(value)}%`;
-  if (label.includes("대표 키워드")) return (value: number) => `${Math.max(1, Math.round(value))}위`;
+  if (label.includes("대표 키워드") || label.includes("순위")) return (value: number) => `${Math.max(1, Math.round(value))}위`;
 
   return (value: number) => formatCount(value);
 }
 
 function getTrendMetricVolatility(metric: ChannelMetric) {
   if (metric.label.includes("구독자") || metric.label.includes("팔로워")) return 0.08;
-  if (metric.label.includes("평균") || metric.label.includes("률") || metric.label.includes("대표 키워드")) return 0.22;
+  if (metric.label.includes("평균") || metric.label.includes("률") || metric.label.includes("대표 키워드") || metric.label.includes("순위")) return 0.22;
   if (metric.label.includes("시간") || metric.label.includes("체류") || metric.label.includes("사용")) return 0.32;
   return 1;
 }
@@ -948,7 +1220,7 @@ function buildMetricTrendPoints(channel: ChannelView, metric: ChannelMetric): Tr
   const volatility = getTrendMetricVolatility(metric);
   const deltaRate = parseDeltaRate(metric.delta);
   const firstValue =
-    metric.label.includes("대표 키워드") && metric.delta.includes("계단")
+    (metric.label.includes("대표 키워드") || metric.label.includes("순위")) && metric.delta.includes("계단")
       ? baseValue + parseMetricScore(metric.delta)
       : deltaRate !== 0
         ? baseValue / Math.max(0.2, 1 + deltaRate)
@@ -1182,34 +1454,35 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
     }
 
     case "naver": {
-      const report = pickFilter(filters["보고서"], ["전체", "방문·유입", "콘텐츠", "분포·순위"] as const, "전체");
-      if (report === "방문·유입") {
+      const report = pickFilter(filters["보고서"], ["전체", "필수 지표", "유입분석", "분포·순위"] as const, "전체");
+      if (report === "필수 지표") {
         return {
           ...channel,
           kpis: [
             metric("조회수", "5,400", "+10%", "partial"),
-            metric("순방문자", "3,860", "+8%", "partial"),
-            metric("검색 유입", "2,142", "+13%"),
-            metric("평균 사용", "1:42", "+6%"),
+            metric("순방문자수", "3,860", "+8%", "partial"),
+            metric("방문 횟수", "4,920", "+9%", "partial"),
+            metric("평균 사용 시간", "1:42", "+6%"),
+            metric("재방문율", "18%", "+2%"),
           ],
           trend: scaleTrend(channel.trend, 1.05, 3),
-          topContent: decorateContentVariant(channel.topContent, channel.topContent, "방문·유입", "유입"),
-          dataNote: "Naver Blog 방문·유입 기준입니다. 조회수와 순방문자는 단순 합산하지 않고 기간 기준으로 표시합니다.",
+          topContent: decorateContentVariant(channel.topContent, channel.topContent, "필수 지표", "조회"),
+          dataNote: "Naver Blog 필수 파일 기준입니다. 조회수, 유입분석, 순방문자수, 방문 횟수, 평균 사용 시간, 재방문율을 월간 파일에서 가져옵니다.",
         };
       }
 
-      if (report === "콘텐츠") {
+      if (report === "유입분석") {
         return {
           ...channel,
           kpis: [
-            metric("게시글 조회", "4,120", "+12%", "partial"),
-            metric("평균 체류", "1:56", "+9%"),
-            metric("댓글", "42", "+5%"),
-            metric("스크랩", "18", "+4%"),
+            metric("검색 유입", "2,142", "+13%", "partial"),
+            metric("외부 유입", "824", "+7%", "partial"),
+            metric("직접 유입", "611", "+5%"),
+            metric("상위 유입 비중", "64%", "+6%"),
           ],
           trend: scaleTrend(channel.trend, 0.9, 4),
-          topContent: decorateContentVariant(channel.topContent, channel.topContent, "콘텐츠", "조회"),
-          dataNote: "Naver Blog 콘텐츠 기준입니다. 게시글별 조회·체류·댓글·스크랩을 콘텐츠 단위로 봅니다.",
+          topContent: decorateContentVariant(channel.topContent, channel.topContent, "유입분석", "유입"),
+          dataNote: "Naver Blog 유입분석 기준입니다. 검색, 외부, 직접 유입을 분리하고 유입원별 기여를 봅니다.",
         };
       }
 
@@ -1217,14 +1490,15 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
         return {
           ...channel,
           kpis: [
-            metric("대표 키워드", "12위", "+4계단"),
-            metric("검색 노출", "18,600", "+15%"),
-            metric("상위 유입", "64%", "+6%"),
-            metric("재방문율", "18%", "+2%"),
+            metric("조회수 순위", "1위", "유지"),
+            metric("공감수 순위", "3위", "+2계단"),
+            metric("댓글수 순위", "5위", "+1계단"),
+            metric("주요 연령", "35-44", "선택 파일"),
+            metric("주요 국가", "KR 94%", "선택 파일"),
           ],
           trend: scaleTrend(channel.trend, 0.74, 8),
           topContent: decorateContentVariant(channel.topContent, channel.topContent, "분포·순위", "순위"),
-          dataNote: "Naver Blog 분포·순위 기준입니다. 검색어 분포와 대표 키워드 순위를 별도 리포트로 확인합니다.",
+          dataNote: "Naver Blog 선택 파일 기준입니다. 성/연령, 국가, 조회수·공감수·댓글수 순위는 들어온 달에만 보조 리포트로 표시합니다.",
         };
       }
 
@@ -1405,23 +1679,25 @@ function ChannelsView({
           </p>
         </div>
         <div className="summary-actions">
-          <div className="filter-stack">
-            {filterGroups.map((group) => (
-              <div className="filter-group" key={group.label}>
-                <span>{group.label}</span>
-                <Segmented
-                  value={selectedFilters[group.label] ?? group.options[0]}
-                  items={group.options.map((option) => ({ value: option, label: option }))}
-                  onChange={(value) =>
-                    setSelectedFilters((current) => ({
-                      ...current,
-                      [group.label]: value,
-                    }))
-                  }
-                />
-              </div>
-            ))}
-          </div>
+          {filterGroups.length > 0 && (
+            <div className="filter-stack">
+              {filterGroups.map((group) => (
+                <div className="filter-group" key={group.label}>
+                  <span>{group.label}</span>
+                  <Segmented
+                    value={selectedFilters[group.label] ?? group.options[0]}
+                    items={group.options.map((option) => ({ value: option, label: option }))}
+                    onChange={(value) =>
+                      setSelectedFilters((current) => ({
+                        ...current,
+                        [group.label]: value,
+                      }))
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          )}
           <button className="button secondary" onClick={onCompare}>
             <BarChart3 size={16} />
             기간 비교
@@ -1497,6 +1773,7 @@ function ChannelsView({
       </div>
 
       {channel.id === "youtube" && <YouTubeAiInsightPanel />}
+      {filteredChannel.id === "naver" && <NaverBlogDetailPanel />}
 
       <section className="section-panel">
         <div className="section-header">
@@ -1574,6 +1851,99 @@ function YouTubeAiInsightPanel() {
         </div>
       </section>
     </div>
+  );
+}
+
+function NaverBlogDetailPanel() {
+  const [activeTab, setActiveTab] = useState<NaverDetailTab>("required");
+
+  return (
+    <section className="section-panel naver-detail-panel">
+      <div className="section-header">
+        <div>
+          <h2>네이버 월간 파일 상세</h2>
+          <p>필수 항목과 선택 항목을 분리해 월별로 확인합니다.</p>
+        </div>
+        <Segmented
+          value={activeTab}
+          items={naverDetailTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
+          onChange={(value) => setActiveTab(value as NaverDetailTab)}
+        />
+      </div>
+
+      {activeTab === "required" && (
+        <div className="naver-required-grid">
+          {naverRequiredMetrics.map((metric) => (
+            <div className="naver-required-row" key={metric.label}>
+              <span>{metric.label}</span>
+              <strong>{metric.value}</strong>
+              <em>{metric.delta}</em>
+              <small>{metric.note}</small>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {activeTab === "traffic" && (
+        <div className="naver-drill-grid">
+          <div className="naver-bar-list">
+            {naverTrafficSources.map((source) => (
+              <div className="naver-bar-row" key={source.label}>
+                <div>
+                  <strong>{source.label}</strong>
+                  <span>{source.value} · {source.delta}</span>
+                </div>
+                <div className="naver-bar-track">
+                  <span style={{ width: `${source.share}%` }} />
+                </div>
+                <em>{source.share}%</em>
+              </div>
+            ))}
+          </div>
+          <div className="naver-note-box">
+            <strong>확인 포인트</strong>
+            <p>검색 유입이 높으면 SEO용 기술 콘텐츠를 유지하고, 외부 유입이 늘면 링크가 걸린 캠페인/광고 소재와 연결해 봅니다.</p>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "segments" && (
+        <div className="naver-drill-grid">
+          <div className="naver-segment-list">
+            {naverDistributionRows.map((row) => (
+              <div className="naver-segment-row" key={row.label}>
+                <span>{row.label}</span>
+                <strong>{row.value}</strong>
+                <small>{row.detail}</small>
+              </div>
+            ))}
+          </div>
+          <div className="naver-ranking-list">
+            {naverRankingRows.map((row) => (
+              <div className="naver-ranking-row" key={row.metric}>
+                <span>{row.metric}</span>
+                <strong>{row.title}</strong>
+                <em>{row.value}</em>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {activeTab === "validation" && (
+        <div className="naver-validation-grid">
+          {naverFileValidationRows.map((row) => (
+            <div className="naver-validation-row" key={row.label}>
+              <div>
+                <strong>{row.label}</strong>
+                <span>{row.type}</span>
+              </div>
+              <StatusPill status={row.status} />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -3255,38 +3625,44 @@ function AdContentEditor({
   );
 }
 
-function DataCenter({ data }: { data: DataCenterSnapshot }) {
+function DataCenter({
+  data,
+  importing,
+  importResult,
+  onImportFiles,
+}: {
+  data: DataCenterSnapshot;
+  importing: boolean;
+  importResult: DataFileImportResult | null;
+  onImportFiles: (files: File[]) => void;
+}) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourcesPagination = usePaginatedItems(data.sources);
   const issuesPagination = usePaginatedItems(data.issues);
   const mappingPagination = usePaginatedItems(data.mappingRows);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
-  const [importedFiles, setImportedFiles] = useState<
-    Array<{ id: string; name: string; size: string; importedAt: string }>
-  >([]);
-
-  const formatFileSize = (bytes: number) => {
-    if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
-    return `${Math.max(1, Math.round(bytes / 1024))}KB`;
-  };
+  const [importError, setImportError] = useState<string | null>(null);
 
   const handleFiles = (files: FileList | null) => {
-    if (!files?.length) return;
+    if (!files?.length || importing) return;
 
-    const nextFiles = Array.from(files).map((file) => ({
-      id: `${file.name}-${file.lastModified}-${file.size}`,
-      name: file.name,
-      size: formatFileSize(file.size),
-      importedAt: "방금 추가됨",
-    }));
+    const selectedFiles = Array.from(files);
+    const acceptedFiles = selectedFiles.filter((file) =>
+      FILE_IMPORT_EXTENSIONS.some((extension) => file.name.toLowerCase().endsWith(extension)),
+    );
 
-    setImportedFiles((current) => {
-      const withoutDuplicates = current.filter((file) => !nextFiles.some((next) => next.id === file.id));
-      return [...nextFiles, ...withoutDuplicates].slice(0, 10);
-    });
+    if (!acceptedFiles.length) {
+      setImportError("CSV, TSV, XLS, XLSX 파일만 업로드할 수 있습니다.");
+      return;
+    }
+
+    setImportError(null);
+    onImportFiles(acceptedFiles);
   };
 
-  const openFilePicker = () => fileInputRef.current?.click();
+  const openFilePicker = () => {
+    if (!importing) fileInputRef.current?.click();
+  };
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -3317,9 +3693,10 @@ function DataCenter({ data }: { data: DataCenterSnapshot }) {
           </div>
         ))}
         <div
-          className={`source-tile file-import-card ${isDraggingFile ? "dragging" : ""}`}
+          className={`source-tile file-import-card ${isDraggingFile ? "dragging" : ""} ${importing ? "processing" : ""}`}
           role="button"
           tabIndex={0}
+          aria-busy={importing}
           onClick={openFilePicker}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
@@ -3343,7 +3720,7 @@ function DataCenter({ data }: { data: DataCenterSnapshot }) {
             ref={fileInputRef}
             className="visually-hidden-file-input"
             type="file"
-            accept=".xlsx,.xls,.csv,.tsv"
+            accept={FILE_IMPORT_EXTENSIONS.join(",")}
             multiple
             onChange={(event) => {
               handleFiles(event.currentTarget.files);
@@ -3359,20 +3736,37 @@ function DataCenter({ data }: { data: DataCenterSnapshot }) {
               <p>LinkedIn · TikTok · Naver Blog</p>
             </div>
           </div>
-          <span className="source-kind">CSV / XLSX</span>
-          <p>여기로 드래그하거나 클릭해서 업로드합니다. 매핑과 중복 검증은 아래 이슈에서 바로 확인합니다.</p>
-          {importedFiles.length > 0 ? (
-            <div className="imported-file-list">
-              {importedFiles.slice(0, 3).map((file) => (
-                <div className="imported-file-row" key={file.id}>
-                  <FileText size={14} />
-                  <span>{file.name}</span>
-                  <em>{file.size}</em>
-                </div>
-              ))}
+          <span className="source-kind">CSV / TSV / XLSX</span>
+          <p>파일을 넣으면 채널을 추정하고, 콘텐츠 성과 데이터로 파싱한 뒤 화면 데이터를 자동 갱신합니다.</p>
+          {importing ? (
+            <div className="file-import-status processing">
+              <Loader2 size={16} className="spin" />
+              <strong>파싱 중</strong>
+              <span>파일 구조 인식 · 채널 매핑 · 성과 반영</span>
+            </div>
+          ) : importError ? (
+            <div className="file-import-status warning">
+              <AlertCircle size={16} />
+              <strong>지원하지 않는 형식 제외</strong>
+              <span>{importError}</span>
+            </div>
+          ) : importResult ? (
+            <div className="file-import-status complete">
+              <Check size={16} />
+              <strong>{importResult.totalFiles}개 파일 파싱 완료</strong>
+              <span>{importResult.importedAt} 데이터 새로고침 완료</span>
+              <div className="import-channel-chips">
+                {(Object.entries(importResult.channelCounts) as Array<[FileImportChannel, number]>)
+                  .filter(([, count]) => count > 0)
+                  .map(([channel, count]) => (
+                    <em key={channel}>
+                      {channelMeta[channel].label} {count}
+                    </em>
+                  ))}
+              </div>
             </div>
           ) : (
-            <small>파일 선택 또는 드래그앤드랍</small>
+            <small>파일명 목록 대신 파싱 결과가 Data Center와 채널 성과에 바로 반영됩니다.</small>
           )}
         </div>
       </section>
@@ -3962,6 +4356,9 @@ type ContentPerformanceSortKey =
   | "clicks"
   | "followers"
   | "visitors"
+  | "visits"
+  | "trafficInflow"
+  | "revisitRate"
   | "searchClicks"
   | "inquiries";
 type ContentPerformanceRow = {
@@ -3979,11 +4376,14 @@ type ContentPerformanceRow = {
   clicks: number;
   followers: number;
   visitors: number;
+  visits: number;
+  trafficInflow: number;
+  revisitRate: number;
   searchClicks: number;
   inquiries: number;
 };
 
-type PerformanceColumn = { key: ContentPerformanceSortKey; label: string; format?: "count" | "duration" | "date" };
+type PerformanceColumn = { key: ContentPerformanceSortKey; label: string; format?: "count" | "duration" | "date" | "percent" };
 type ContentTypeTag = { label: string; tone: "orange" | "pink" | "teal" | "blue" | "green" | "violet" | "gray" };
 
 const channelPerformanceColumns: Record<Exclude<ChannelId, "all">, PerformanceColumn[]> = {
@@ -4025,10 +4425,11 @@ const channelPerformanceColumns: Record<Exclude<ChannelId, "all">, PerformanceCo
   naver: [
     { key: "publishTime", label: "발행일", format: "date" },
     { key: "views", label: "조회수" },
-    { key: "visitors", label: "순방문자" },
-    { key: "avgWatchSeconds", label: "평균 사용", format: "duration" },
-    { key: "comments", label: "댓글" },
-    { key: "shares", label: "공유" },
+    { key: "trafficInflow", label: "유입분석" },
+    { key: "visitors", label: "순방문자수" },
+    { key: "visits", label: "방문 횟수" },
+    { key: "avgWatchSeconds", label: "평균 사용 시간", format: "duration" },
+    { key: "revisitRate", label: "재방문율", format: "percent" },
   ],
   website: [
     { key: "publishTime", label: "발행일", format: "date" },
@@ -4142,6 +4543,9 @@ function getContentPerformanceRow(item: ContentItem): ContentPerformanceRow {
   let clicks = 0;
   let followers = 0;
   let visitors = 0;
+  let visits = 0;
+  let trafficInflow = 0;
+  let revisitRate = 0;
   let searchClicks = 0;
   let inquiries = 0;
 
@@ -4191,13 +4595,20 @@ function getContentPerformanceRow(item: ContentItem): ContentPerformanceRow {
         break;
       }
       case "naver": {
-        if (label.includes("순방문") || label.includes("유입")) {
+        if (label.includes("순방문")) {
           visitors = Math.round(metricBase);
           views = Math.round(metricBase * (1.28 + (seed % 18) / 100));
+        } else if (label.includes("유입")) {
+          trafficInflow = Math.round(metricBase);
+          visitors = Math.round(metricBase * (1.45 + (seed % 18) / 100));
+          views = Math.round(visitors * (1.18 + (seed % 14) / 100));
         } else {
           views = Math.round(metricBase);
           visitors = Math.round(metricBase * (0.58 + (seed % 19) / 100));
         }
+        visits = Math.max(visitors, Math.round(visitors * (1.18 + (seed % 16) / 100)));
+        trafficInflow = trafficInflow || Math.max(0, Math.round(visits * (0.44 + (seed % 13) / 100)));
+        revisitRate = Math.min(78, Math.max(5, Math.round(14 + (seed % 18) + visits / Math.max(views, 1) * 8)));
         break;
       }
       default: {
@@ -4243,6 +4654,9 @@ function getContentPerformanceRow(item: ContentItem): ContentPerformanceRow {
     clicks,
     followers,
     visitors,
+    visits,
+    trafficInflow,
+    revisitRate,
     searchClicks,
     inquiries,
   };
@@ -4274,6 +4688,7 @@ function ChannelContentPerformanceTable({ items }: { items: ContentItem[] }) {
   const formatCellValue = (row: ContentPerformanceRow, column: PerformanceColumn) => {
     if (column.format === "date") return row.item.publishDate;
     if (column.format === "duration") return row.avgWatchLabel;
+    if (column.format === "percent") return `${Math.round(row[column.key] as number)}%`;
     const value = row[column.key] as number;
     return typeof value === "number" && value > 0 ? formatCount(value) : "-";
   };
