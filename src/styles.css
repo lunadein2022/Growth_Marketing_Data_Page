@@ -1663,6 +1663,41 @@ h3 {
   color: #fff;
 }
 
+.firebase-import-auth {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 38px;
+  padding: 8px 9px;
+  border: 1px solid #f6d28f;
+  border-radius: 8px;
+  background: #fff8e8;
+}
+
+.firebase-import-auth.connected {
+  border-color: #bfe8d3;
+  background: #f4fbf7;
+}
+
+.firebase-import-auth span {
+  min-width: 0;
+  overflow: hidden;
+  color: #536072;
+  font-size: 12px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.firebase-import-auth.connected span {
+  color: #006a53;
+}
+
+.firebase-import-auth .button {
+  flex: 0 0 auto;
+}
+
 .file-import-status {
   display: flex;
   flex-direction: column;
@@ -1687,6 +1722,22 @@ h3 {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+}
+
+.firebase-persistence {
+  width: 100%;
+  padding-top: 4px;
+  border-top: 1px solid #dfe9e5;
+  font-weight: 900;
+}
+
+.firebase-persistence.saved {
+  color: #006a53;
+}
+
+.firebase-persistence.skipped,
+.firebase-persistence.error {
+  color: #9a3412;
 }
 
 .file-import-status.processing {

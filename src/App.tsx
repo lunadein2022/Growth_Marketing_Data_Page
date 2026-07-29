@@ -14,6 +14,8 @@ import {
   FolderKanban,
   Gauge,
   LineChart,
+  LogIn,
+  LogOut,
   Loader2,
   Megaphone,
   Plus,
@@ -27,6 +29,17 @@ import type React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { channelMeta } from "./data/mockData";
 import { createBrandDataProvider } from "./services/dataGateway";
+import {
+  hasFirebaseConfig,
+  signInWithGoogle,
+  signOutFromFirebase,
+  subscribeToFirebaseUser,
+  type FirebaseDashboardUser,
+} from "./services/firebaseClient";
+import {
+  persistImportedFilesToFirebase,
+  type FirebaseImportPersistence,
+} from "./services/firebaseFileImports";
 import type {
   AdContent,
   AiBriefing,
@@ -641,6 +654,10 @@ function App() {
   const [generating, setGenerating] = useState(false);
   const [importingFiles, setImportingFiles] = useState(false);
   const [lastFileImport, setLastFileImport] = useState<DataFileImportResult | null>(null);
+  const [importPersistence, setImportPersistence] = useState<FirebaseImportPersistence | null>(null);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseDashboardUser | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const firebaseConfigured = hasFirebaseConfig();
 
   useEffect(() => {
     let mounted = true;
@@ -662,6 +679,8 @@ function App() {
       mounted = false;
     };
   }, [periodMode]);
+
+  useEffect(() => subscribeToFirebaseUser(setFirebaseUser), []);
 
   const selectedChannelView = channels.find((channel) => channel.id === selectedChannel) ?? channels[0];
 
@@ -698,18 +717,43 @@ function App() {
     replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
   const handleSaveAd = async (ad: AdContent) => replaceContentLab(await provider.upsertAd(ad, periodMode));
   const handleDeleteAd = async (adId: string) => replaceContentLab(await provider.deleteAd(adId, periodMode));
+  const handleFirebaseSignIn = async () => {
+    setAuthBusy(true);
+
+    try {
+      await signInWithGoogle();
+      setImportPersistence(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Firebase 로그인 실패";
+      setImportPersistence({ status: "error", message });
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+  const handleFirebaseSignOut = async () => {
+    setAuthBusy(true);
+
+    try {
+      await signOutFromFirebase();
+    } finally {
+      setAuthBusy(false);
+    }
+  };
   const handleImportFiles = async (files: File[]) => {
     if (!files.length || importingFiles) return;
 
     setImportingFiles(true);
+    setImportPersistence(null);
 
     try {
       await new Promise((resolve) => window.setTimeout(resolve, 650));
       const result = buildDataFileImportResult(files);
+      const persistence = await persistImportedFilesToFirebase(files, result, firebaseUser);
       setDataCenter((current) => (current ? applyImportToDataCenter(current, result) : current));
       setContentLab((current) => (current ? applyImportToContentLab(current, result) : current));
       setChannels((current) => applyImportToChannels(current, result));
       setLastFileImport(result);
+      setImportPersistence(persistence);
     } finally {
       setImportingFiles(false);
     }
@@ -830,6 +874,12 @@ function App() {
                 data={dataCenter}
                 importing={importingFiles}
                 importResult={lastFileImport}
+                importPersistence={importPersistence}
+                firebaseConfigured={firebaseConfigured}
+                firebaseUser={firebaseUser}
+                authBusy={authBusy}
+                onSignIn={handleFirebaseSignIn}
+                onSignOut={handleFirebaseSignOut}
                 onImportFiles={handleImportFiles}
               />
             )}
@@ -3649,11 +3699,23 @@ function DataCenter({
   data,
   importing,
   importResult,
+  importPersistence,
+  firebaseConfigured,
+  firebaseUser,
+  authBusy,
+  onSignIn,
+  onSignOut,
   onImportFiles,
 }: {
   data: DataCenterSnapshot;
   importing: boolean;
   importResult: DataFileImportResult | null;
+  importPersistence: FirebaseImportPersistence | null;
+  firebaseConfigured: boolean;
+  firebaseUser: FirebaseDashboardUser | null;
+  authBusy: boolean;
+  onSignIn: () => void;
+  onSignOut: () => void;
   onImportFiles: (files: File[]) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -3663,8 +3725,23 @@ function DataCenter({
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
 
+  const ensureUploadReady = () => {
+    if (!firebaseConfigured) {
+      setImportError("Firebase 환경변수가 없어 실제 파일 저장을 할 수 없습니다.");
+      return false;
+    }
+
+    if (!firebaseUser) {
+      setImportError("Google 로그인 후 Firebase Storage에 파일을 저장할 수 있습니다.");
+      return false;
+    }
+
+    return true;
+  };
+
   const handleFiles = (files: FileList | null) => {
     if (!files?.length || importing) return;
+    if (!ensureUploadReady()) return;
 
     const selectedFiles = Array.from(files);
     const acceptedFiles = selectedFiles.filter((file) =>
@@ -3681,7 +3758,8 @@ function DataCenter({
   };
 
   const openFilePicker = () => {
-    if (!importing) fileInputRef.current?.click();
+    if (importing || !ensureUploadReady()) return;
+    fileInputRef.current?.click();
   };
 
   const handleDrop = (event: React.DragEvent<HTMLDivElement>) => {
@@ -3758,11 +3836,39 @@ function DataCenter({
           </div>
           <span className="source-kind">CSV / TSV / XLSX</span>
           <p>파일을 넣으면 채널을 추정하고, 콘텐츠 성과 데이터로 파싱한 뒤 화면 데이터를 자동 갱신합니다.</p>
+          <div className={firebaseUser ? "firebase-import-auth connected" : "firebase-import-auth"}>
+            <span>{firebaseUser ? `${firebaseUser.email ?? "로그인 사용자"} 연결됨` : "Firebase 저장은 Google 로그인 필요"}</span>
+            {firebaseUser ? (
+              <button
+                className="button secondary small"
+                disabled={authBusy}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSignOut();
+                }}
+              >
+                <LogOut size={14} />
+                로그아웃
+              </button>
+            ) : (
+              <button
+                className="button dark small"
+                disabled={authBusy || !firebaseConfigured}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onSignIn();
+                }}
+              >
+                {authBusy ? <Loader2 size={14} className="spin" /> : <LogIn size={14} />}
+                Google 로그인
+              </button>
+            )}
+          </div>
           {importing ? (
             <div className="file-import-status processing">
               <Loader2 size={16} className="spin" />
-              <strong>파싱 중</strong>
-              <span>파일 구조 인식 · 채널 매핑 · 성과 반영</span>
+              <strong>저장 및 파싱 중</strong>
+              <span>Firebase Storage 저장 · Firestore 기록 · 채널 매핑</span>
             </div>
           ) : importError ? (
             <div className="file-import-status warning">
@@ -3775,6 +3881,11 @@ function DataCenter({
               <Check size={16} />
               <strong>{importResult.totalFiles}개 파일 파싱 완료</strong>
               <span>{importResult.importedAt} 데이터 새로고침 완료</span>
+              {importPersistence && (
+                <span className={`firebase-persistence ${importPersistence.status}`}>
+                  {importPersistence.message}
+                </span>
+              )}
               <div className="import-channel-chips">
                 {(Object.entries(importResult.channelCounts) as Array<[FileImportChannel, number]>)
                   .filter(([, count]) => count > 0)
