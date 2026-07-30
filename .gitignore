@@ -14,3 +14,6 @@ pnpm-debug.log*
 
 .DS_Store
 Thumbs.db
+
+# Claude Code local (per-developer) settings — keep launch.json shared
+.claude/settings.local.json

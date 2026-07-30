@@ -1781,7 +1781,7 @@ function ChannelsView({
     .join(" · ");
 
   return (
-    <div className="screen-stack">
+    <div className="screen-stack channels-view" style={{ "--channel-accent": channel.color } as React.CSSProperties}>
       <div className="channel-tabs">
         {orderedChannels.map((item) => (
           <button

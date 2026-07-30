@@ -1,0 +1,31 @@
+# Supabase local development config.
+# Full reference: https://supabase.com/docs/guides/local-development/cli/config
+project_id = "dummdumm-brand-os"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+
+[db]
+port = 54322
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:5173"
+additional_redirect_urls = ["http://localhost:5173"]
+
+# Google OAuth (fill secrets via `supabase secrets` / dashboard, not here).
+[auth.external.google]
+enabled = true
+client_id = "env(SUPABASE_AUTH_GOOGLE_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_GOOGLE_SECRET)"
+
+[functions.ai-briefings]
+verify_jwt = true

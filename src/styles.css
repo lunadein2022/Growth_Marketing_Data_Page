@@ -3,30 +3,45 @@
 :root {
   font-family:
     "SUIT Variable", SUIT, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  color: #141821;
-  background: #eef2f6;
+  color: #101828;
+  background: #eef1f6;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  --surface: rgba(255, 255, 255, 0.94);
+  --surface: #ffffff;
   --surface-solid: #ffffff;
-  --surface-soft: #f7f9fc;
-  --line: #dce4ee;
-  --line-strong: #c8d3e0;
-  --muted: #667386;
-  --text-soft: #333b49;
-  --accent: #ff6b2c;
-  --accent-weak: #fff0e8;
-  --dark: #111827;
-  --green: #007a5f;
-  --red: #d93d3d;
-  --blue: #2563eb;
-  --violet: #7c5cff;
-  --shadow: 0 14px 34px rgba(31, 41, 55, 0.08);
-  --shadow-soft: 0 7px 18px rgba(31, 41, 55, 0.06);
-  --radius: 8px;
-  --ui-scale: 0.8;
+  --surface-soft: #f6f8fb;
+  --surface-sunken: #eef2f7;
+  --line: #e7ebf1;
+  --line-strong: #d3dae4;
+  --muted: #69748a;
+  --text: #101828;
+  --text-soft: #3a4457;
+  --accent: #f2611f;
+  --accent-strong: #dd500f;
+  --accent-weak: #fff3ec;
+  --dark: #111a2e;
+  --green: #0a8f66;
+  --green-weak: #e6f7f0;
+  --red: #dc4740;
+  --red-weak: #fdeceb;
+  --blue: #2f6bed;
+  --violet: #6f5bff;
+  --shadow:
+    0 1px 2px rgba(16, 24, 40, 0.04),
+    0 10px 28px rgba(16, 24, 40, 0.07);
+  --shadow-soft:
+    0 1px 2px rgba(16, 24, 40, 0.04),
+    0 2px 8px rgba(16, 24, 40, 0.05);
+  --shadow-pop:
+    0 2px 6px rgba(16, 24, 40, 0.06),
+    0 18px 40px rgba(16, 24, 40, 0.12);
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-lg: 14px;
+  --channel-accent: var(--accent);
+  --ui-scale: 0.85;
 }
 
 * {
@@ -38,7 +53,10 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background:
-    linear-gradient(180deg, #f6f8fb 0%, #edf1f6 46%, #e7ecf3 100%);
+    radial-gradient(1200px 640px at 88% -8%, #eef4fd 0%, rgba(238, 244, 253, 0) 62%),
+    radial-gradient(1000px 560px at 0% 0%, var(--accent-weak) 0%, rgba(255, 243, 236, 0) 46%),
+    linear-gradient(180deg, #f5f7fb 0%, #eaeef5 60%, #e6ebf3 100%);
+  background-attachment: fixed;
 }
 
 @media (min-width: 900px) {
@@ -3392,3 +3410,284 @@ select {
     width: 100%;
   }
 }
+
+/* =====================================================================
+   Refinement layer — 2026 visual pass.
+   Additive, class-name-preserving polish (logic/data bindings untouched).
+   Later source order wins ties; channel-scoped rules use higher specificity.
+   ===================================================================== */
+
+/* --- Surfaces: hairline borders + layered soft shadows + softer radius --- */
+.summary-band,
+.section-panel {
+  border-radius: var(--radius-lg);
+  border-color: var(--line);
+  box-shadow: var(--shadow-soft);
+}
+
+.section-panel {
+  padding: 20px 22px;
+}
+
+.section-panel:hover,
+.metric-tile:hover,
+.source-tile:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+  transform: translateY(-2px);
+}
+
+.main-nav,
+.sub-nav,
+.channel-tabs {
+  border-radius: var(--radius-lg);
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: var(--shadow-soft);
+}
+
+/* Command-center hero band: calm branded wash instead of a hard orange edge */
+.summary-band {
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+  background: linear-gradient(118deg, var(--accent-weak) 0%, #fff 44%);
+}
+
+/* --- Typographic hierarchy --- */
+h1 {
+  font-size: 25px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+}
+
+.section-header h2 {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+}
+
+.eyebrow {
+  color: var(--accent-strong);
+  font-size: 11px;
+  letter-spacing: 0.09em;
+}
+
+/* --- Metric tiles --- */
+.metric-tile,
+.source-tile {
+  position: relative;
+  border-radius: var(--radius);
+  border-color: var(--line);
+  box-shadow: var(--shadow-soft);
+  overflow: hidden;
+}
+
+.tile-head span:first-child,
+.source-tile strong {
+  font-size: 12.5px;
+  letter-spacing: 0.01em;
+  color: var(--text-soft);
+}
+
+.metric-value {
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: -0.025em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Secondary + delta read as compact chips */
+.metric-secondary {
+  background: var(--green-weak);
+  color: var(--green);
+}
+
+.delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  margin-top: 10px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 900;
+  font-variant-numeric: tabular-nums;
+}
+
+.delta.up {
+  color: var(--green);
+  background: var(--green-weak);
+}
+
+.delta.down {
+  color: var(--red);
+  background: var(--red-weak);
+}
+
+.delta.neutral {
+  color: var(--muted);
+  background: var(--surface-sunken);
+}
+
+/* --- Status pills: add definition with hairline borders --- */
+.status-pill {
+  border: 1px solid transparent;
+  letter-spacing: 0.01em;
+}
+
+.status-complete,
+.pub-published {
+  border-color: color-mix(in srgb, var(--green) 24%, transparent);
+}
+
+.status-partial {
+  border-color: #f2d698;
+}
+
+.status-error,
+.pub-delayed {
+  border-color: color-mix(in srgb, var(--red) 24%, transparent);
+}
+
+.status-not_uploaded,
+.status-unavailable {
+  border-color: var(--line-strong);
+}
+
+/* --- Buttons --- */
+.button.primary {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent-strong) 100%);
+  box-shadow:
+    0 1px 2px rgba(221, 80, 15, 0.22),
+    0 8px 18px rgba(221, 80, 15, 0.2);
+}
+
+.button.dark {
+  background: linear-gradient(180deg, #1c2946 0%, var(--dark) 100%);
+}
+
+.button:active {
+  transform: translateY(0);
+}
+
+/* --- Segmented control: clean white active pill on a sunken track --- */
+.segmented {
+  background: var(--surface-sunken);
+  border-color: var(--line);
+}
+
+.segmented button.active {
+  background: #fff;
+  color: var(--text);
+  box-shadow: var(--shadow-soft);
+}
+
+/* --- Tables --- */
+.table-scroll {
+  border-radius: var(--radius);
+  border-color: var(--line);
+  box-shadow: var(--shadow-soft);
+}
+
+.data-table th {
+  background: var(--surface-soft);
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid var(--line);
+}
+
+.data-table th,
+.data-table td {
+  border-color: var(--line);
+}
+
+.data-table tbody tr:hover td {
+  background: var(--surface-soft);
+}
+
+/* --- Charts & callouts --- */
+.sparkline-plot {
+  background: linear-gradient(180deg, #fcfdff 0%, #f6f9fc 100%);
+  border-color: var(--line);
+  border-radius: var(--radius);
+}
+
+.inline-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.inline-note svg {
+  flex: 0 0 auto;
+  color: var(--accent-strong);
+}
+
+/* =====================================================================
+   Channel theming — each channel carries its own accent (--channel-accent),
+   so the key metric that matters per channel is what draws the eye first.
+   Scoped to .channels-view; the accent comes from channel.color via inline var.
+   ===================================================================== */
+
+.channels-view .channel-summary {
+  border-left: 4px solid var(--channel-accent);
+  background: linear-gradient(
+    104deg,
+    color-mix(in srgb, var(--channel-accent) 9%, #fff) 0%,
+    #fff 46%
+  );
+}
+
+.channels-view .channel-summary .eyebrow {
+  color: var(--channel-accent);
+}
+
+/* Active channel tab wears the channel's own color */
+.channels-view .channel-tab.active {
+  background: var(--channel-accent);
+  color: #fff;
+}
+
+/* Primary metric (first KPI per channel) is elevated and accent-marked */
+.channels-view .metric-grid > .metric-tile:first-child {
+  border-color: color-mix(in srgb, var(--channel-accent) 34%, var(--line));
+  box-shadow:
+    0 1px 2px rgba(16, 24, 40, 0.05),
+    0 12px 28px color-mix(in srgb, var(--channel-accent) 16%, transparent);
+}
+
+.channels-view .metric-grid > .metric-tile:first-child::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: var(--channel-accent);
+}
+
+.channels-view .metric-grid > .metric-tile:first-child .metric-value {
+  color: var(--channel-accent);
+}
+
+.channels-view .metric-grid > .metric-tile:first-child .tile-head span:first-child::after {
+  content: "핵심 지표";
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--channel-accent) 14%, #fff);
+  color: var(--channel-accent);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
