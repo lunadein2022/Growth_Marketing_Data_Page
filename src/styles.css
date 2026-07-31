@@ -1297,9 +1297,9 @@ h3 {
   min-width: 0;
 }
 
-.highlight-row span:not(.delta),
-.publishing-row span,
-.issue-row span {
+.highlight-row span:not(.delta):not(.channel-initial):not(.status-pill),
+.publishing-row span:not(.channel-initial):not(.status-pill),
+.issue-row span:not(.channel-initial):not(.status-pill) {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
@@ -1615,7 +1615,7 @@ h3 {
 }
 
 .publishing-row strong,
-.publishing-row span {
+.publishing-row span:not(.channel-initial):not(.status-pill) {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;

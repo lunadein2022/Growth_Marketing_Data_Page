@@ -17,3 +17,6 @@ Thumbs.db
 
 # Claude Code local (per-developer) settings — keep launch.json shared
 .claude/settings.local.json
+
+# Supabase CLI local state (machine-specific)
+supabase/.temp/
