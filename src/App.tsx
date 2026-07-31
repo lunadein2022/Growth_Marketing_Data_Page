@@ -30,16 +30,26 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { channelMeta } from "./data/mockData";
 import { createBrandDataProvider } from "./services/dataGateway";
 import {
-  hasFirebaseConfig,
+  hasAuthConfig,
   signInWithGoogle,
-  signOutFromFirebase,
-  subscribeToFirebaseUser,
-  type FirebaseDashboardUser,
-} from "./services/firebaseClient";
+  signOutFromAuth,
+  subscribeToAuthUser,
+  type DashboardUser,
+} from "./services/authClient";
 import {
-  persistImportedFilesToFirebase,
-  type FirebaseImportPersistence,
-} from "./services/firebaseFileImports";
+  persistImportedFilesToSupabase,
+  type SupabaseImportPersistence,
+} from "./services/supabaseFileImports";
+import {
+  canUseEdgeBriefings,
+  generateBriefingViaEdge,
+  type BriefingContext,
+} from "./services/aiBriefings";
+import {
+  canComparePeriods,
+  computePeriodComparison,
+  type DateRange,
+} from "./services/periodComparison";
 import { parseNaverMonthlyFiles, type NaverMonthlyReport } from "./services/naverMonthlyParser";
 import type {
   AdContent,
@@ -614,6 +624,31 @@ function getWeekdayLabel(date: Date) {
   return ["일", "월", "화", "수", "목", "금", "토"][date.getDay()];
 }
 
+function toIsoDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function firstOfMonthUtc(iso: string): Date {
+  const parsed = new Date(`${iso}T00:00:00Z`);
+  const base = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  return new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), 1));
+}
+
+// Default compare ranges: current = last full calendar month, previous = the month before.
+function defaultCompareRanges() {
+  const now = new Date();
+  const curEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+  const curStart = new Date(Date.UTC(curEnd.getUTCFullYear(), curEnd.getUTCMonth(), 1));
+  const prevEnd = new Date(Date.UTC(curStart.getUTCFullYear(), curStart.getUTCMonth(), 0));
+  const prevStart = new Date(Date.UTC(prevEnd.getUTCFullYear(), prevEnd.getUTCMonth(), 1));
+  return {
+    curStart: curStart.toISOString().slice(0, 10),
+    curEnd: curEnd.toISOString().slice(0, 10),
+    prevStart: prevStart.toISOString().slice(0, 10),
+    prevEnd: prevEnd.toISOString().slice(0, 10),
+  };
+}
+
 const comparisonDetailOptions: Record<ChannelId, string[]> = {
   all: ["채널 기여도", "브랜드 노출", "콘텐츠 소비", "검색 가시성"],
   youtube: ["전체", "쇼츠", "롱폼"],
@@ -734,11 +769,11 @@ function App() {
   const [generating, setGenerating] = useState(false);
   const [importingFiles, setImportingFiles] = useState(false);
   const [lastFileImport, setLastFileImport] = useState<DataFileImportResult | null>(null);
-  const [importPersistence, setImportPersistence] = useState<FirebaseImportPersistence | null>(null);
-  const [firebaseUser, setFirebaseUser] = useState<FirebaseDashboardUser | null>(null);
+  const [importPersistence, setImportPersistence] = useState<SupabaseImportPersistence | null>(null);
+  const [authUser, setAuthUser] = useState<DashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
-  const firebaseConfigured = hasFirebaseConfig();
+  const authConfigured = hasAuthConfig();
 
   useEffect(() => {
     let mounted = true;
@@ -761,9 +796,57 @@ function App() {
     };
   }, [periodMode]);
 
-  useEffect(() => subscribeToFirebaseUser(setFirebaseUser), []);
+  useEffect(() => subscribeToAuthUser(setAuthUser), []);
 
   const selectedChannelView = channels.find((channel) => channel.id === selectedChannel) ?? channels[0];
+
+  const buildBriefingContext = (targetChannel?: Exclude<ChannelId, "all">): BriefingContext => {
+    const channelView = targetChannel ? channels.find((channel) => channel.id === targetChannel) : undefined;
+    const figures: Record<string, unknown> = {};
+    const sources = new Set<string>();
+
+    if (snapshot) {
+      snapshot.kpis.forEach((kpi) => kpi.source && sources.add(kpi.source));
+      figures.command = {
+        kpis: snapshot.kpis.map((kpi) => ({
+          label: kpi.label,
+          value: kpi.value,
+          delta: kpi.delta,
+          status: kpi.status,
+          source: kpi.source,
+        })),
+        trends: snapshot.trends,
+        channelHighlights: snapshot.channelHighlights,
+      };
+    }
+
+    if (channelView) {
+      sources.add(channelView.source);
+      figures.channel = {
+        name: channelView.name,
+        role: channelView.role,
+        objective: channelView.objective,
+        kpis: channelView.kpis.map((kpi) => ({
+          label: kpi.label,
+          value: kpi.value,
+          secondary: kpi.secondary,
+          delta: kpi.delta,
+          status: kpi.status,
+        })),
+        trend: channelView.trend,
+        topContent: channelView.topContent.slice(0, 5).map((item) => ({
+          title: item.title,
+          metric: `${item.metricValue} ${item.metricLabel}`,
+        })),
+      };
+    }
+
+    return {
+      dataSources: [...sources],
+      dataWarnings: getBriefingWarnings(channels, dataCenter ?? undefined, targetChannel),
+      figures,
+    };
+  };
 
   const handleGenerateBriefing = async (
     surface: "command" | "channel" | "campaign" | "ad",
@@ -775,8 +858,27 @@ function App() {
     setBriefingOpen(true);
     setBriefing(null);
 
+    const request = { surface, periodMode, channel, campaign, ad };
+
     try {
-      const nextBriefing = await provider.generateBriefing({ surface, periodMode, channel, campaign, ad });
+      let nextBriefing: AiBriefing;
+
+      if (canUseEdgeBriefings() && authUser) {
+        try {
+          nextBriefing = await generateBriefingViaEdge(request, buildBriefingContext(channel));
+        } catch (error) {
+          // Fall back to the local template so the panel always renders something.
+          const detail = error instanceof Error ? error.message : "알 수 없는 오류";
+          const fallback = await provider.generateBriefing(request);
+          nextBriefing = {
+            ...fallback,
+            dataWarnings: [`실제 AI 호출 실패로 목업 보고서로 대체했습니다: ${detail}`, ...fallback.dataWarnings],
+          };
+        }
+      } else {
+        nextBriefing = await provider.generateBriefing(request);
+      }
+
       setBriefing(nextBriefing);
       setBriefingHistory((current) => [nextBriefing, ...current]);
     } finally {
@@ -798,24 +900,24 @@ function App() {
     replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
   const handleSaveAd = async (ad: AdContent) => replaceContentLab(await provider.upsertAd(ad, periodMode));
   const handleDeleteAd = async (adId: string) => replaceContentLab(await provider.deleteAd(adId, periodMode));
-  const handleFirebaseSignIn = async () => {
+  const handleSignIn = async () => {
     setAuthBusy(true);
 
     try {
       await signInWithGoogle();
       setImportPersistence(null);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Firebase 로그인 실패";
+      const message = error instanceof Error ? error.message : "로그인 실패";
       setImportPersistence({ status: "error", message });
     } finally {
       setAuthBusy(false);
     }
   };
-  const handleFirebaseSignOut = async () => {
+  const handleSignOut = async () => {
     setAuthBusy(true);
 
     try {
-      await signOutFromFirebase();
+      await signOutFromAuth();
     } finally {
       setAuthBusy(false);
     }
@@ -835,7 +937,7 @@ function App() {
         return null;
       });
       const result: DataFileImportResult = { ...baseResult, naverMonthlyReport: naverReport };
-      const persistence = await persistImportedFilesToFirebase(files, result, firebaseUser);
+      const persistence = await persistImportedFilesToSupabase(files, result, authUser);
       const nextPersistence =
         naverParseError && persistence.status === "saved"
           ? { ...persistence, message: `${persistence.message} · 네이버 파싱 실패: ${naverParseError}` }
@@ -968,11 +1070,11 @@ function App() {
                 importing={importingFiles}
                 importResult={lastFileImport}
                 importPersistence={importPersistence}
-                firebaseConfigured={firebaseConfigured}
-                firebaseUser={firebaseUser}
+                authConfigured={authConfigured}
+                authUser={authUser}
                 authBusy={authBusy}
-                onSignIn={handleFirebaseSignIn}
-                onSignOut={handleFirebaseSignOut}
+                onSignIn={handleSignIn}
+                onSignOut={handleSignOut}
                 onImportFiles={handleImportFiles}
               />
             )}
@@ -3804,8 +3906,8 @@ function DataCenter({
   importing,
   importResult,
   importPersistence,
-  firebaseConfigured,
-  firebaseUser,
+  authConfigured,
+  authUser,
   authBusy,
   onSignIn,
   onSignOut,
@@ -3814,9 +3916,9 @@ function DataCenter({
   data: DataCenterSnapshot;
   importing: boolean;
   importResult: DataFileImportResult | null;
-  importPersistence: FirebaseImportPersistence | null;
-  firebaseConfigured: boolean;
-  firebaseUser: FirebaseDashboardUser | null;
+  importPersistence: SupabaseImportPersistence | null;
+  authConfigured: boolean;
+  authUser: DashboardUser | null;
   authBusy: boolean;
   onSignIn: () => void;
   onSignOut: () => void;
@@ -3830,13 +3932,13 @@ function DataCenter({
   const [importError, setImportError] = useState<string | null>(null);
 
   const ensureUploadReady = () => {
-    if (!firebaseConfigured) {
-      setImportError("Firebase 환경변수가 없어 실제 파일 저장을 할 수 없습니다.");
+    if (!authConfigured) {
+      setImportError("Supabase 환경변수가 없어 실제 파일 저장을 할 수 없습니다.");
       return false;
     }
 
-    if (!firebaseUser) {
-      setImportError("Google 로그인 후 Firebase Storage에 파일을 저장할 수 있습니다.");
+    if (!authUser) {
+      setImportError("Google 로그인 후 Supabase Storage에 파일을 저장할 수 있습니다.");
       return false;
     }
 
@@ -3940,9 +4042,9 @@ function DataCenter({
           </div>
           <span className="source-kind">CSV / TSV / XLS / XLSX</span>
           <p>파일을 넣으면 데이터 소스로 저장합니다. 콘텐츠 리스트에는 게시물 단위로 추출된 행만 추가됩니다.</p>
-          <div className={firebaseUser ? "firebase-import-auth connected" : "firebase-import-auth"}>
-            <span>{firebaseUser ? `${firebaseUser.email ?? "로그인 사용자"} 연결됨` : "Firebase 저장은 Google 로그인 필요"}</span>
-            {firebaseUser ? (
+          <div className={authUser ? "supabase-import-auth connected" : "supabase-import-auth"}>
+            <span>{authUser ? `${authUser.email ?? "로그인 사용자"} 연결됨` : "저장하려면 Google 로그인 필요"}</span>
+            {authUser ? (
               <button
                 className="button secondary small"
                 disabled={authBusy}
@@ -3957,7 +4059,7 @@ function DataCenter({
             ) : (
               <button
                 className="button dark small"
-                disabled={authBusy || !firebaseConfigured}
+                disabled={authBusy || !authConfigured}
                 onClick={(event) => {
                   event.stopPropagation();
                   onSignIn();
@@ -3972,7 +4074,7 @@ function DataCenter({
             <div className="file-import-status processing">
               <Loader2 size={16} className="spin" />
               <strong>저장 및 분류 중</strong>
-              <span>Firebase Storage 저장 · Firestore 기록 · 데이터 소스 매핑</span>
+              <span>Supabase Storage 저장 · DB 기록 · 데이터 소스 매핑</span>
             </div>
           ) : importError ? (
             <div className="file-import-status warning">
@@ -3986,7 +4088,7 @@ function DataCenter({
               <strong>{importResult.totalFiles}개 파일 저장 완료</strong>
               <span>{importResult.importedAt} 데이터 소스 갱신 완료</span>
               {importPersistence && (
-                <span className={`firebase-persistence ${importPersistence.status}`}>
+                <span className={`import-persistence ${importPersistence.status}`}>
                   {importPersistence.message}
                 </span>
               )}
@@ -4076,35 +4178,167 @@ function DataCenter({
   );
 }
 
+function DateRangePicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: DateRange;
+  onChange: (range: DateRange) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<Date>(() => firstOfMonthUtc(value.start));
+  const [pendingStart, setPendingStart] = useState<string | null>(null);
+  const [hovered, setHovered] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setView(firstOfMonthUtc(value.start));
+    setPendingStart(null);
+    setHovered(null);
+    const onPointerDown = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [open, value.start]);
+
+  const year = view.getUTCFullYear();
+  const month = view.getUTCMonth();
+  const firstWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();
+  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  const cells: Array<string | null> = [];
+  for (let blank = 0; blank < firstWeekday; blank += 1) cells.push(null);
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push(new Date(Date.UTC(year, month, day)).toISOString().slice(0, 10));
+  }
+
+  const handleDay = (iso: string) => {
+    if (!pendingStart) {
+      setPendingStart(iso);
+      return;
+    }
+    const [start, end] = pendingStart <= iso ? [pendingStart, iso] : [iso, pendingStart];
+    onChange({ start, end });
+    setPendingStart(null);
+    setHovered(null);
+    setOpen(false);
+  };
+
+  // While picking a new range, ignore the old value and show only the in-progress
+  // selection (pendingStart → hovered day preview).
+  let selStart = value.start;
+  let selEnd = value.end;
+  if (pendingStart) {
+    const other = hovered ?? pendingStart;
+    [selStart, selEnd] = pendingStart <= other ? [pendingStart, other] : [other, pendingStart];
+  }
+
+  return (
+    <div className="range-field" ref={ref}>
+      <span>{label}</span>
+      <button type="button" className="range-trigger" onClick={() => setOpen((prev) => !prev)}>
+        <CalendarDays size={15} />
+        <strong>{value.start}</strong>
+        <em>~</em>
+        <strong>{value.end}</strong>
+      </button>
+      {open && (
+        <div className="range-calendar">
+          <div className="range-calendar-head">
+            <button
+              type="button"
+              className="icon-button mini"
+              aria-label="이전 달"
+              onClick={() => setView(new Date(Date.UTC(year, month - 1, 1)))}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <strong>
+              {year}년 {month + 1}월
+            </strong>
+            <button
+              type="button"
+              className="icon-button mini"
+              aria-label="다음 달"
+              onClick={() => setView(new Date(Date.UTC(year, month + 1, 1)))}
+            >
+              <ChevronRight size={16} />
+            </button>
+          </div>
+          <div className="range-calendar-grid">
+            {["일", "월", "화", "수", "목", "금", "토"].map((weekday) => (
+              <span className="range-weekday" key={weekday}>
+                {weekday}
+              </span>
+            ))}
+            {cells.map((iso, index) => {
+              if (!iso) return <span key={`blank-${index}`} />;
+              const isEdge = iso === selStart || iso === selEnd;
+              const inRange = iso > selStart && iso < selEnd;
+              return (
+                <button
+                  type="button"
+                  key={iso}
+                  className={["range-day", isEdge ? "edge" : "", inRange ? "in-range" : ""].filter(Boolean).join(" ")}
+                  onMouseEnter={() => setHovered(iso)}
+                  onClick={() => handleDay(iso)}
+                >
+                  {Number(iso.slice(8, 10))}
+                </button>
+              );
+            })}
+          </div>
+          <div className="range-calendar-foot">
+            {pendingStart ? `시작 ${pendingStart} · 종료일을 선택하세요` : "시작일을 선택하세요"}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PeriodCompareModal({ onClose }: { onClose: () => void }) {
+  const defaults = useMemo(() => defaultCompareRanges(), []);
   const [scope, setScope] = useState<ChannelId>("all");
-  const [detail, setDetail] = useState(comparisonDetailOptions.all[0]);
-  const [granularity, setGranularity] = useState<CompareGranularity>("month");
-  const [baseline, setBaseline] = useState(baselineOptions.month[0]);
+  const [current, setCurrent] = useState<DateRange>({ start: defaults.curStart, end: defaults.curEnd });
+  const [previous, setPrevious] = useState<DateRange>({ start: defaults.prevStart, end: defaults.prevEnd });
   const [comparison, setComparison] = useState<PeriodComparison | null>(null);
-
-  const detailOptions = useMemo(() => {
-    return comparisonDetailOptions[scope];
-  }, [scope]);
+  const [error, setError] = useState<string | null>(null);
+  const configured = canComparePeriods();
 
   useEffect(() => {
-    setDetail(detailOptions[0]);
-  }, [detailOptions]);
-
-  useEffect(() => {
-    setBaseline(baselineOptions[granularity][0]);
-  }, [granularity]);
-
-  useEffect(() => {
+    if (!configured) {
+      setComparison(null);
+      return;
+    }
     let mounted = true;
     setComparison(null);
-    provider.getPeriodComparison(scope, detail, granularity, baseline).then((result) => {
-      if (mounted) setComparison(result);
-    });
+    setError(null);
+    computePeriodComparison(scope, current, previous)
+      .then((result) => {
+        if (mounted) setComparison(result);
+      })
+      .catch((err) => {
+        if (mounted) setError(err instanceof Error ? err.message : "비교 계산 실패");
+      });
     return () => {
       mounted = false;
     };
-  }, [scope, detail, granularity, baseline]);
+  }, [configured, scope, current, previous]);
+
+  const fillPreviousFromCurrent = () => {
+    const startMs = Date.parse(`${current.start}T00:00:00Z`);
+    const endMs = Date.parse(`${current.end}T00:00:00Z`);
+    if (Number.isNaN(startMs) || Number.isNaN(endMs) || endMs < startMs) return;
+    const dayMs = 86400000;
+    const lengthDays = Math.round((endMs - startMs) / dayMs) + 1;
+    const prevEndMs = startMs - dayMs;
+    const prevStartMs = prevEndMs - (lengthDays - 1) * dayMs;
+    setPrevious({ start: toIsoDate(prevStartMs), end: toIsoDate(prevEndMs) });
+  };
 
   const scopeTabs: Array<{ id: ChannelId; label: string }> = [
     { id: "all", label: "전체" },
@@ -4132,30 +4366,20 @@ function PeriodCompareModal({ onClose }: { onClose: () => void }) {
           ))}
         </div>
 
-        <div className="compare-controls">
-          <Segmented
-            value={granularity}
-            items={[
-              { value: "week", label: "주" },
-              { value: "month", label: "월" },
-              { value: "year", label: "연" },
-            ]}
-            onChange={(value) => setGranularity(value as CompareGranularity)}
-          />
-          <select value={detail} onChange={(event) => setDetail(event.target.value)} aria-label="세부 보기">
-            {detailOptions.map((option) => (
-              <option key={option}>{option}</option>
-            ))}
-          </select>
-          <select value={baseline} onChange={(event) => setBaseline(event.target.value)} aria-label="비교 기준">
-            {baselineOptions[granularity].map((option) => (
-              <option key={option}>{option}</option>
-            ))}
-          </select>
-          <span className="current-label">vs 지금 · {comparison?.currentLabel ?? "현재 기간"}</span>
+        <div className="compare-range-controls">
+          <DateRangePicker label="과거 기간" value={previous} onChange={setPrevious} />
+          <DateRangePicker label="현재 기간" value={current} onChange={setCurrent} />
+          <button className="button secondary small" onClick={fillPreviousFromCurrent}>
+            <CalendarDays size={14} />
+            직전 동일 기간 자동
+          </button>
         </div>
 
-        {!comparison ? (
+        {!configured ? (
+          <div className="loading-panel slim">Supabase 연결 후 실데이터 기간 비교가 활성화됩니다.</div>
+        ) : error ? (
+          <div className="loading-panel slim">비교 계산 실패: {error}</div>
+        ) : !comparison ? (
           <div className="loading-panel slim">
             <Loader2 size={18} className="spin" />
             비교 계산 중

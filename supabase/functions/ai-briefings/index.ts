@@ -10,9 +10,9 @@
 //
 // Core rule enforced in the system prompt: the model may ONLY use numbers that
 // appear in `context`. It must never invent metrics. Missing values are marked
-// N/A / "일부 데이터".
+// N/A / "일부 데이터". Output is a single JSON object matching the AiBriefing shape.
 
-import Anthropic from "npm:@anthropic-ai/sdk@^0.68.0";
+import Anthropic from "npm:@anthropic-ai/sdk";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const MODEL = "claude-opus-5";
@@ -25,44 +25,13 @@ type BriefingRequest = {
   ad?: string;
 };
 
-// The frontend sends whatever it has aggregated on screen. The shape is
-// intentionally open — the model is told to treat it as the ONLY source of truth.
 type BriefingContext = {
   periodLabel?: string;
   dataSources?: string[];
   dataWarnings?: string[];
-  // Arbitrary screen-aggregated figures (KPIs, trends, channel rows, etc.).
   figures?: Record<string, unknown>;
   [key: string]: unknown;
 };
-
-// Structured-output schema matching the frontend AiBriefing type.
-const briefingSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    title: { type: "string" },
-    periodLabel: { type: "string" },
-    summary: { type: "string" },
-    dataSources: { type: "array", items: { type: "string" } },
-    dataWarnings: { type: "array", items: { type: "string" } },
-    wins: { type: "array", items: { type: "string" } },
-    risks: { type: "array", items: { type: "string" } },
-    actions: { type: "array", items: { type: "string" } },
-    evidence: { type: "array", items: { type: "string" } },
-  },
-  required: [
-    "title",
-    "periodLabel",
-    "summary",
-    "dataSources",
-    "dataWarnings",
-    "wins",
-    "risks",
-    "actions",
-    "evidence",
-  ],
-} as const;
 
 const SYSTEM_PROMPT = `당신은 DummDumm Inc. 마케팅팀의 브랜드 인텔리전스 분석가입니다.
 멀티채널(YouTube·Instagram·Naver·TikTok·LinkedIn·Website) 마케팅 성과를 바탕으로 간결한 한국어 AI 보고서를 작성합니다.
@@ -70,9 +39,13 @@ const SYSTEM_PROMPT = `당신은 DummDumm Inc. 마케팅팀의 브랜드 인텔�
 절대 규칙:
 1. context에 실제로 존재하는 수치만 사용합니다. context에 없는 숫자·비율·증감은 절대 만들어내지 않습니다.
 2. 데이터가 부분적이거나 없으면 "N/A" 또는 "일부 데이터"로 표시하고 dataWarnings에 명시합니다.
-3. evidence에는 context에서 인용한 구체 수치만 넣습니다(예: "Website 사용자 10,657 → 12,840 (+20%)"). context에 근거가 없으면 evidence를 비웁니다.
+3. evidence에는 context에서 인용한 구체 수치만 넣습니다(예: "Website 사용자 10,657 → 12,840 (+20%)"). 근거가 없으면 evidence를 빈 배열로 둡니다.
 4. summary/wins/risks/actions는 근거 있는 해석과 실행 제안만 담고, 과장하지 않습니다.
-5. 출력은 반드시 요청된 JSON 스키마를 따릅니다.`;
+
+출력 형식(매우 중요):
+- 오직 하나의 JSON 객체만 출력합니다. 코드펜스(\`\`\`), 설명 문장, 앞뒤 텍스트를 절대 붙이지 않습니다.
+- 키: title(string), periodLabel(string), summary(string), dataSources(string[]),
+  dataWarnings(string[]), wins(string[]), risks(string[]), actions(string[]), evidence(string[]).`;
 
 function buildUserPrompt(request: BriefingRequest, context: BriefingContext): string {
   const periodWord = request.periodMode === "weekly" ? "주간" : "월간";
@@ -91,23 +64,35 @@ function buildUserPrompt(request: BriefingRequest, context: BriefingContext): st
     JSON.stringify(context, null, 2),
     "```",
     "",
-    `제목(title)은 "${target} ${periodWord} AI 보고서" 형식을 기본으로 하되 자연스럽게 다듬어도 됩니다.`,
-    "periodLabel은 context.periodLabel이 있으면 그대로 사용하세요.",
+    `title은 "${target} ${periodWord} AI 보고서" 형식을 기본으로 하되 자연스럽게 다듬어도 됩니다.`,
+    "periodLabel은 context.periodLabel이 있으면 그대로, 없으면 보고 주기에 맞춰 자연스럽게 만드세요.",
+    "다시 강조: JSON 객체 하나만, 다른 텍스트 없이 출력하세요.",
   ].join("\n");
+}
+
+// Tolerant JSON extraction: strips code fences and grabs the outermost object.
+function extractJson(text: string): unknown {
+  let cleaned = text.trim();
+  const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) cleaned = fence[1].trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    cleaned = cleaned.slice(start, end + 1);
+  }
+  return JSON.parse(cleaned);
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
-
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
 
   // Require an authenticated caller (Supabase forwards the user's JWT here).
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) {
+  if (!req.headers.get("Authorization")) {
     return jsonResponse({ error: "Missing Authorization header" }, 401);
   }
 
@@ -135,11 +120,6 @@ Deno.serve(async (req) => {
     const message = await client.messages.create({
       model: MODEL,
       max_tokens: 4096,
-      thinking: { type: "adaptive" },
-      output_config: {
-        effort: "high",
-        format: { type: "json_schema", schema: briefingSchema },
-      },
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: buildUserPrompt(request, context) }],
     });
@@ -149,15 +129,30 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: "The request was declined by safety filters." }, 422);
     }
 
-    const textBlock = message.content.find((block) => block.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
+    const textBlock = message.content.find((block: { type: string }) => block.type === "text") as
+      | { type: "text"; text: string }
+      | undefined;
+    if (!textBlock) {
       return jsonResponse({ error: "No text content returned from the model." }, 502);
     }
 
-    const parsed = JSON.parse(textBlock.text);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = extractJson(textBlock.text) as Record<string, unknown>;
+    } catch {
+      return jsonResponse({ error: "모델 응답을 JSON으로 파싱하지 못했습니다." }, 502);
+    }
 
-    // Assemble the AiBriefing the frontend expects.
     const briefing = {
+      title: "",
+      periodLabel: context.periodLabel ?? "",
+      summary: "",
+      dataSources: [],
+      dataWarnings: [],
+      wins: [],
+      risks: [],
+      actions: [],
+      evidence: [],
       ...parsed,
       generatedAt: new Date().toISOString(),
     };

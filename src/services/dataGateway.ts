@@ -101,7 +101,7 @@ class ApiBackedProvider extends MockBrandDataProvider {
 export function createBrandDataProvider(): BrandDataProvider {
   const dataMode = import.meta.env.VITE_DATA_MODE ?? "mock";
   const apiBaseUrl =
-    import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_FIREBASE_FUNCTIONS_BASE_URL ?? "http://localhost:8787";
+    import.meta.env.VITE_API_BASE_URL ?? import.meta.env.VITE_SUPABASE_FUNCTIONS_URL ?? "http://localhost:8787";
 
   if (dataMode === "api") {
     return new ApiBackedProvider(apiBaseUrl);
