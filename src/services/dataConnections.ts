@@ -17,6 +17,7 @@ export type ApiConnectionRequirement = {
   label: string;
   accounts: string[];
   metrics: string[];
+  scopes: string[];
   syncTargets: string[];
   requiredSecrets: string[];
 };
@@ -28,8 +29,12 @@ export const API_CONNECTION_REQUIREMENTS: ApiConnectionRequirement[] = [
     label: "YouTube Analytics API",
     accounts: ["본계 Shorts", "본계 Longform"],
     metrics: ["구독자", "조회수", "시청시간", "평균 시청"],
+    scopes: [
+      "https://www.googleapis.com/auth/youtube.readonly",
+      "https://www.googleapis.com/auth/yt-analytics.readonly",
+    ],
     syncTargets: ["channel_accounts", "published_posts", "metric_snapshots", "metric_time_series"],
-    requiredSecrets: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+    requiredSecrets: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
   },
   {
     id: "instagram",
@@ -37,6 +42,7 @@ export const API_CONNECTION_REQUIREMENTS: ApiConnectionRequirement[] = [
     label: "Instagram Graph API",
     accounts: ["회사 본계 Carousel/Reels", "둠둠로그 Carousel/Reels"],
     metrics: ["팔로워", "도달", "조회", "저장", "공유"],
+    scopes: ["instagram_basic", "instagram_manage_insights", "pages_show_list"],
     syncTargets: ["channel_accounts", "published_posts", "metric_snapshots", "metric_time_series"],
     requiredSecrets: ["META_APP_ID", "META_APP_SECRET"],
   },
@@ -46,8 +52,12 @@ export const API_CONNECTION_REQUIREMENTS: ApiConnectionRequirement[] = [
     label: "GA4 + Search Console",
     accounts: ["Website KR", "Website EN"],
     metrics: ["사용자", "세션", "검색어", "클릭", "노출", "문의"],
+    scopes: [
+      "https://www.googleapis.com/auth/analytics.readonly",
+      "https://www.googleapis.com/auth/webmasters.readonly",
+    ],
     syncTargets: ["channel_accounts", "published_posts", "metric_snapshots", "metric_time_series"],
-    requiredSecrets: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"],
+    requiredSecrets: ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REFRESH_TOKEN"],
   },
 ];
 

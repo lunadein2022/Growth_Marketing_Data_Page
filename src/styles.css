@@ -1718,6 +1718,42 @@ h3 {
   font-weight: 900;
 }
 
+.source-action-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.source-action-row span {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.sync-note {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.sync-note.complete {
+  border: 1px solid #bfe8d3;
+  background: #f4fbf7;
+  color: #006a53 !important;
+}
+
+.sync-note.error {
+  border: 1px solid #fecaca;
+  background: #fff7f7;
+  color: #b42318 !important;
+}
+
 .file-import-card {
   grid-column: span 2;
   cursor: pointer;

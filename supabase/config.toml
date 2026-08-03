@@ -29,3 +29,6 @@ secret = "env(SUPABASE_AUTH_GOOGLE_SECRET)"
 
 [functions.ai-briefings]
 verify_jwt = true
+
+[functions.youtube-sync]
+verify_jwt = true

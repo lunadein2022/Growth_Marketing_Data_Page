@@ -57,6 +57,11 @@ import {
   type FileImportChannel,
 } from "./services/dataConnections";
 import {
+  canSyncYoutubeAnalytics,
+  syncYoutubeAnalytics,
+  type YoutubeSyncState,
+} from "./services/youtubeSync";
+import {
   canComparePeriods,
   computePeriodComparison,
   type DateRange,
@@ -890,6 +895,8 @@ function App() {
   const [importingFiles, setImportingFiles] = useState(false);
   const [lastFileImport, setLastFileImport] = useState<DataFileImportResult | null>(null);
   const [importPersistence, setImportPersistence] = useState<SupabaseImportPersistence | null>(null);
+  const [youtubeSyncing, setYoutubeSyncing] = useState(false);
+  const [youtubeSyncResult, setYoutubeSyncResult] = useState<YoutubeSyncState | null>(null);
   const [authUser, setAuthUser] = useState<DashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
@@ -1160,6 +1167,68 @@ function App() {
     }
   };
 
+  const handleSyncYouTube = async () => {
+    if (youtubeSyncing) return;
+
+    if (!canSyncYoutubeAnalytics()) {
+      setYoutubeSyncResult({ status: "error", message: "Supabase 환경변수가 없어 YouTube API 동기화를 실행할 수 없습니다." });
+      return;
+    }
+
+    if (!authUser) {
+      setYoutubeSyncResult({ status: "error", message: "Google 로그인 후 YouTube API 동기화를 실행할 수 있습니다." });
+      return;
+    }
+
+    const range = getBriefingPeriodRange(periodMode);
+    setYoutubeSyncing(true);
+    setYoutubeSyncResult(null);
+
+    try {
+      const result = await syncYoutubeAnalytics({
+        periodMode,
+        startDate: range.start,
+        endDate: range.end,
+        maxVideos: 50,
+      });
+      setYoutubeSyncResult(result);
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "google-youtube"
+                  ? {
+                      ...source,
+                      status: "complete",
+                      lastSync: formatImportTimestamp(),
+                      detail: `${result.channelTitle} ${result.periodStart}~${result.periodEnd} · 영상 ${result.videosSynced}개 · 일별 ${result.dailyPoints}개 저장`,
+                    }
+                  : source,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setYoutubeSyncResult({
+        status: "error",
+        message: error instanceof Error ? error.message : "YouTube API 동기화 실패",
+      });
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "google-youtube" ? { ...source, status: "error", lastSync: formatImportTimestamp() } : source,
+              ),
+            }
+          : current,
+      );
+    } finally {
+      setYoutubeSyncing(false);
+    }
+  };
+
   const ready = snapshot && contentLab && dataCenter && channels.length > 0;
 
   return (
@@ -1281,9 +1350,12 @@ function App() {
                 authConfigured={authConfigured}
                 authUser={authUser}
                 authBusy={authBusy}
+                youtubeSyncing={youtubeSyncing}
+                youtubeSyncResult={youtubeSyncResult}
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
                 onImportFiles={handleImportFiles}
+                onSyncYouTube={handleSyncYouTube}
               />
             )}
 
@@ -4154,9 +4226,12 @@ function DataCenter({
   authConfigured,
   authUser,
   authBusy,
+  youtubeSyncing,
+  youtubeSyncResult,
   onSignIn,
   onSignOut,
   onImportFiles,
+  onSyncYouTube,
 }: {
   data: DataCenterSnapshot;
   importing: boolean;
@@ -4165,9 +4240,12 @@ function DataCenter({
   authConfigured: boolean;
   authUser: DashboardUser | null;
   authBusy: boolean;
+  youtubeSyncing: boolean;
+  youtubeSyncResult: YoutubeSyncState | null;
   onSignIn: () => void;
   onSignOut: () => void;
   onImportFiles: (files: File[]) => void;
+  onSyncYouTube: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourcesPagination = usePaginatedItems(data.sources);
@@ -4265,6 +4343,22 @@ function DataCenter({
             ) : null}
             <p>{source.detail}</p>
             <small>{source.lastSync}</small>
+            {source.id === "google-youtube" && (
+              <div className="source-action-row">
+                <button className="button secondary small" disabled={youtubeSyncing || !authUser} onClick={onSyncYouTube}>
+                  {youtubeSyncing ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                  YouTube 동기화
+                </button>
+                {!authUser && <span>Google 로그인 필요</span>}
+              </div>
+            )}
+            {source.id === "google-youtube" && youtubeSyncResult && (
+              <small className={`sync-note ${youtubeSyncResult.status}`}>
+                {youtubeSyncResult.status === "complete"
+                  ? `${youtubeSyncResult.videosSynced}개 영상 · ${youtubeSyncResult.dailyPoints}일 지표 저장`
+                  : youtubeSyncResult.message}
+              </small>
+            )}
           </div>
         ))}
         <div
