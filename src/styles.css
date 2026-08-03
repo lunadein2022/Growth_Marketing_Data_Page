@@ -869,6 +869,44 @@ h3 {
   flex: 0 0 auto;
 }
 
+.naver-detail-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.naver-period-select {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid #d8e1ec;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.naver-period-select span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.naver-period-select select {
+  min-width: 132px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 900;
+  outline: none;
+}
+
 .naver-required-grid,
 .naver-validation-grid {
   display: grid;
@@ -3474,6 +3512,21 @@ select {
   .naver-required-grid,
   .naver-validation-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .naver-detail-panel .section-header,
+  .naver-detail-controls {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .naver-detail-controls,
+  .naver-period-select {
+    width: 100%;
+  }
+
+  .naver-period-select select {
+    width: 100%;
   }
 
   .issue-list.wide {

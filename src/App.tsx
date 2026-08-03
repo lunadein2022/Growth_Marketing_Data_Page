@@ -62,7 +62,7 @@ import {
   type PressCoverage,
   type PressRelease,
 } from "./services/pressReleases";
-import { parseNaverMonthlyFiles, type NaverMonthlyReport } from "./services/naverMonthlyParser";
+import { parseNaverMonthlyImport, type NaverMonthlyReport } from "./services/naverMonthlyParser";
 import type {
   AdContent,
   AiBriefing,
@@ -123,6 +123,7 @@ type DataFileImportResult = {
   channelCounts: Record<FileImportChannel, number>;
   items: ParsedFileImportItem[];
   naverMonthlyReport?: NaverMonthlyReport | null;
+  naverMonthlyReports?: NaverMonthlyReport[];
 };
 type PaginationState<T> = {
   page: number;
@@ -316,7 +317,7 @@ function inferImportChannel(fileName: string, index: number): FileImportChannel 
   const source = fileName.toLowerCase();
   if (/linkedin|링크드인|b2b|카드뉴스|card/.test(source)) return "linkedin";
   if (/tiktok|틱톡|숏폼|short|shorts/.test(source)) return "tiktok";
-  if (/naver|네이버|blog|블로그|원고|후기|추천/.test(source)) return "naver";
+  if (/naver|네이버|blog|블로그|원고|후기|추천|조회수|유입|순방문|방문|재방문|평균\s*사용|성연령|성\/연령|국가|공감|댓글|순위/.test(source)) return "naver";
 
   const fallback: FileImportChannel[] = ["linkedin", "tiktok", "naver"];
   return fallback[index % fallback.length];
@@ -382,9 +383,33 @@ function extractRankingMetricValue(value: string) {
   return value.match(/[\d,]+/)?.[0] ?? value;
 }
 
+function getNaverReportsFromImport(result: DataFileImportResult) {
+  if (result.naverMonthlyReports?.length) return result.naverMonthlyReports;
+  return result.naverMonthlyReport ? [result.naverMonthlyReport] : [];
+}
+
+function formatNaverReportRangeLabel(reports: NaverMonthlyReport[]) {
+  if (!reports.length) return "";
+
+  const sorted = [...reports].sort((a, b) => a.periodKey.localeCompare(b.periodKey));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+
+  return first.periodKey === last.periodKey ? first.periodLabel : `${first.periodLabel}~${last.periodLabel}`;
+}
+
+function mergeNaverMonthlyReports(current: NaverMonthlyReport[], incoming: NaverMonthlyReport[]) {
+  const byPeriod = new Map(current.map((report) => [report.periodKey, report]));
+  incoming.forEach((report) => byPeriod.set(report.periodKey, report));
+  return Array.from(byPeriod.values()).sort((a, b) => a.periodKey.localeCompare(b.periodKey));
+}
+
 function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImportResult): DataCenterSnapshot {
   const importedChannels = new Set<FileImportChannel>(result.items.map((item) => item.channel));
   const naverReport = result.naverMonthlyReport;
+  const naverReports = getNaverReportsFromImport(result);
+  if (naverReports.length) importedChannels.add("naver");
+  const naverRangeLabel = formatNaverReportRangeLabel(naverReports);
   const naverCompleteRequired =
     naverReport?.validationRows.filter((row) => row.type === "필수" && row.status === "complete").length ?? 0;
   const summary = (Object.entries(result.channelCounts) as Array<[FileImportChannel, number]>)
@@ -411,7 +436,7 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
         lastSync: result.importedAt,
         detail:
           matchedChannel === "naver" && naverReport
-            ? `${naverReport.periodLabel} 월간 필수 ${naverCompleteRequired}/6개 파싱 · 선택 ${naverReport.sourceFiles.length}개 파일 확인`
+            ? `${naverRangeLabel} ${naverReports.length}개월 적재 · 화면 대표 ${naverReport.periodLabel} 필수 ${naverCompleteRequired}/6개 파싱`
             : `${channelMeta[matchedChannel].label} 업로드 ${result.channelCounts[matchedChannel]}건 저장 · 지표 소스 갱신`,
       };
     }),
@@ -422,8 +447,8 @@ function applyImportToDataCenter(data: DataCenterSnapshot, result: DataFileImpor
               severity: naverReport.parseWarnings.length ? ("warning" as const) : ("info" as const),
               title: "네이버 월간 파일 파싱",
               detail: naverReport.parseWarnings.length
-                ? `${naverReport.periodLabel} · ${naverReport.parseWarnings.join(" · ")}`
-                : `${naverReport.periodLabel} 필수 지표와 선택 파일을 파싱해 네이버 지표 소스에 반영했습니다.`,
+                ? `${naverRangeLabel} ${naverReports.length}개월 적재 · 최신 ${naverReport.periodLabel}: ${naverReport.parseWarnings.join(" · ")}`
+                : `${naverRangeLabel} ${naverReports.length}개월 월별 데이터를 파싱해 네이버 지표 소스에 반영했습니다.`,
             },
           ]
         : []),
@@ -807,6 +832,7 @@ function App() {
   const [authUser, setAuthUser] = useState<DashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
+  const [naverMonthlyReports, setNaverMonthlyReports] = useState<NaverMonthlyReport[]>([]);
   const authConfigured = hasAuthConfig();
 
   useEffect(() => {
@@ -966,11 +992,16 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 650));
       const baseResult = buildDataFileImportResult(files);
       let naverParseError = "";
-      const naverReport = await parseNaverMonthlyFiles(files, baseResult.importedAt).catch((error) => {
+      const naverImport = await parseNaverMonthlyImport(files, baseResult.importedAt).catch((error) => {
         naverParseError = error instanceof Error ? error.message : "네이버 파일 파싱 실패";
         return null;
       });
-      const result: DataFileImportResult = { ...baseResult, naverMonthlyReport: naverReport };
+      const naverReport = naverImport?.latestReport ?? null;
+      const result: DataFileImportResult = {
+        ...baseResult,
+        naverMonthlyReport: naverReport,
+        naverMonthlyReports: naverImport?.monthlyReports ?? [],
+      };
       const persistence = await persistImportedFilesToSupabase(files, result, authUser);
       const nextPersistence =
         naverParseError && persistence.status === "saved"
@@ -979,7 +1010,10 @@ function App() {
       setDataCenter((current) => (current ? applyImportToDataCenter(current, result) : current));
       setContentLab((current) => (current ? applyImportToContentLab(current, result) : current));
       setChannels((current) => applyNaverMonthlyReportToChannels(applyImportToChannels(current, result), naverReport));
-      if (naverReport) setNaverMonthlyReport(naverReport);
+      if (naverReport) {
+        setNaverMonthlyReport(naverReport);
+        setNaverMonthlyReports((current) => mergeNaverMonthlyReports(current, result.naverMonthlyReports ?? [naverReport]));
+      }
       setLastFileImport(result);
       setImportPersistence(nextPersistence);
     } finally {
@@ -1079,6 +1113,7 @@ function App() {
                 onSelectChannel={setSelectedChannel}
                 channel={selectedChannelView}
                 naverMonthlyReport={naverMonthlyReport}
+                naverMonthlyReports={naverMonthlyReports}
                 onCompare={() => setCompareOpen(true)}
                 onGenerate={() => handleGenerateBriefing("channel", selectedChannel)}
               />
@@ -1832,6 +1867,7 @@ function ChannelsView({
   onSelectChannel,
   channel,
   naverMonthlyReport,
+  naverMonthlyReports,
   onCompare,
   onGenerate,
 }: {
@@ -1840,6 +1876,7 @@ function ChannelsView({
   onSelectChannel: (channel: Exclude<ChannelId, "all">) => void;
   channel: ChannelView;
   naverMonthlyReport: NaverMonthlyReport | null;
+  naverMonthlyReports: NaverMonthlyReport[];
   onCompare: () => void;
   onGenerate: () => void;
 }) {
@@ -2056,7 +2093,7 @@ function ChannelsView({
       </div>
 
       {channel.id === "youtube" && <YouTubeAiInsightPanel />}
-      {filteredChannel.id === "naver" && <NaverBlogDetailPanel report={naverMonthlyReport} />}
+      {filteredChannel.id === "naver" && <NaverBlogDetailPanel report={naverMonthlyReport} reports={naverMonthlyReports} />}
 
       <section className="section-panel">
         <div className="section-header">
@@ -2137,13 +2174,39 @@ function YouTubeAiInsightPanel() {
   );
 }
 
-function NaverBlogDetailPanel({ report }: { report: NaverMonthlyReport | null }) {
+function NaverBlogDetailPanel({
+  report,
+  reports,
+}: {
+  report: NaverMonthlyReport | null;
+  reports: NaverMonthlyReport[];
+}) {
   const [activeTab, setActiveTab] = useState<NaverDetailTab>("required");
-  const requiredMetrics = report?.requiredMetrics ?? naverRequiredMetrics;
-  const trafficSources = report?.trafficSources ?? naverTrafficSources;
-  const distributionRows = report?.distributionRows.length ? report.distributionRows : naverDistributionRows;
-  const rankingRows = report?.rankingRows.length ? report.rankingRows : naverRankingRows;
-  const validationRows = report?.validationRows ?? naverFileValidationRows;
+  const availableReports = useMemo(() => {
+    const byPeriod = new Map<string, NaverMonthlyReport>();
+    reports.forEach((item) => byPeriod.set(item.periodKey, item));
+    if (report) byPeriod.set(report.periodKey, report);
+    return Array.from(byPeriod.values()).sort((a, b) => b.periodKey.localeCompare(a.periodKey));
+  }, [report, reports]);
+  const [selectedPeriodKey, setSelectedPeriodKey] = useState(report?.periodKey ?? "");
+
+  useEffect(() => {
+    if (!availableReports.length) {
+      setSelectedPeriodKey("");
+      return;
+    }
+
+    if (!availableReports.some((item) => item.periodKey === selectedPeriodKey)) {
+      setSelectedPeriodKey(availableReports[0].periodKey);
+    }
+  }, [availableReports, selectedPeriodKey]);
+
+  const activeReport = availableReports.find((item) => item.periodKey === selectedPeriodKey) ?? report;
+  const requiredMetrics = activeReport?.requiredMetrics ?? naverRequiredMetrics;
+  const trafficSources = activeReport?.trafficSources ?? naverTrafficSources;
+  const distributionRows = activeReport?.distributionRows.length ? activeReport.distributionRows : naverDistributionRows;
+  const rankingRows = activeReport?.rankingRows.length ? activeReport.rankingRows : naverRankingRows;
+  const validationRows = activeReport?.validationRows ?? naverFileValidationRows;
 
   return (
     <section className="section-panel naver-detail-panel">
@@ -2151,16 +2214,30 @@ function NaverBlogDetailPanel({ report }: { report: NaverMonthlyReport | null })
         <div>
           <h2>네이버 월간 파일 상세</h2>
           <p>
-            {report
-              ? `${report.periodLabel} · ${report.sourceFiles.length}개 파일 파싱 · ${report.importedAt} 갱신`
+            {activeReport
+              ? `${availableReports.length}개월 적재 · 현재 ${activeReport.periodLabel} · ${activeReport.sourceFiles.length}개 파일 파싱 · ${activeReport.importedAt} 갱신`
               : "필수 항목과 선택 항목을 분리해 월별로 확인합니다."}
           </p>
         </div>
-        <Segmented
-          value={activeTab}
-          items={naverDetailTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
-          onChange={(value) => setActiveTab(value as NaverDetailTab)}
-        />
+        <div className="naver-detail-controls">
+          {availableReports.length > 1 && (
+            <label className="naver-period-select">
+              <span>월 선택</span>
+              <select value={selectedPeriodKey} onChange={(event) => setSelectedPeriodKey(event.target.value)}>
+                {availableReports.map((item) => (
+                  <option key={item.periodKey} value={item.periodKey}>
+                    {item.periodLabel}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <Segmented
+            value={activeTab}
+            items={naverDetailTabs.map((tab) => ({ value: tab.id, label: tab.label }))}
+            onChange={(value) => setActiveTab(value as NaverDetailTab)}
+          />
+        </div>
       </div>
 
       {activeTab === "required" && (

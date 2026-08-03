@@ -18,6 +18,7 @@ export type SupabaseFileImportPayload = {
   channelCounts: Partial<Record<Exclude<ChannelId, "all">, number>>;
   items: SupabaseFileImportItem[];
   naverMonthlyReport?: NaverMonthlyReport | null;
+  naverMonthlyReports?: NaverMonthlyReport[];
 };
 
 export type SupabaseImportPersistence =
@@ -82,7 +83,16 @@ export async function persistImportedFilesToSupabase(
     }
 
     const naverReport = payload.naverMonthlyReport ?? null;
-    const status = naverReport ? (naverReport.parseWarnings.length ? "partial" : "complete") : "partial";
+    const naverReports = payload.naverMonthlyReports?.length
+      ? payload.naverMonthlyReports
+      : naverReport
+        ? [naverReport]
+        : [];
+    const status = naverReports.length
+      ? naverReports.some((report) => report.parseWarnings.length)
+        ? "partial"
+        : "complete"
+      : "partial";
 
     const { error: insertError } = await supabase.from("file_imports").insert({
       id: importId,
@@ -98,23 +108,28 @@ export async function persistImportedFilesToSupabase(
         detectedRecords: payload.items,
         files: uploadedFiles,
         naverMonthlyReport: naverReport,
+        naverMonthlyReports: naverReports,
+        naverMonthlyReportCount: naverReports.length,
         createdByEmail: user.email,
       },
     });
     if (insertError) throw insertError;
 
-    // Normalize the Naver monthly report into metric_snapshots / metric_time_series.
+    // Normalize every Naver monthly report into metric_snapshots / metric_time_series.
     // Only REAL values are persisted — the parser's synthetic weekly fallback
     // points (labels "1주".."4주") are skipped so no invented data lands in the DB.
     let normalizationNote = "";
-    if (naverReport) {
+    if (naverReports.length) {
       try {
         const accountId = await resolveChannelAccountId(supabase, "naver", "main");
         if (!accountId) {
           normalizationNote = " · 네이버 채널 계정이 없어 지표 정규화 건너뜀 (0003 시드 필요)";
         } else {
-          const seriesCount = await normalizeNaverMetrics(supabase, accountId, importId, naverReport);
-          normalizationNote = ` · 지표 정규화(스냅샷 1건, 시계열 ${seriesCount}개)`;
+          let seriesCount = 0;
+          for (const report of naverReports) {
+            seriesCount += await normalizeNaverMetrics(supabase, accountId, importId, report);
+          }
+          normalizationNote = ` · 지표 정규화(스냅샷 ${naverReports.length}건, 시계열 ${seriesCount}개)`;
         }
       } catch (error) {
         normalizationNote = ` · 지표 정규화 실패: ${error instanceof Error ? error.message : "오류"}`;
@@ -125,13 +140,23 @@ export async function persistImportedFilesToSupabase(
       status: "saved",
       importId,
       message: naverReport
-        ? `Supabase 저장 완료 · 네이버 ${naverReport.periodLabel} 파싱${normalizationNote} · importId ${importId}`
+        ? `Supabase 저장 완료 · 네이버 ${formatNaverReportRange(naverReports)} ${naverReports.length}개월 파싱 · 화면 대표 ${naverReport.periodLabel}${normalizationNote} · importId ${importId}`
         : `Supabase Storage 저장 완료 · importId ${importId}`,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "알 수 없는 Supabase 저장 오류";
     return { status: "error", message };
   }
+}
+
+function formatNaverReportRange(reports: NaverMonthlyReport[]) {
+  if (!reports.length) return "";
+
+  const sorted = [...reports].sort((a, b) => a.periodKey.localeCompare(b.periodKey));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+
+  return first.periodKey === last.periodKey ? first.periodLabel : `${first.periodLabel}~${last.periodLabel}`;
 }
 
 type SupabaseServiceClient = ReturnType<typeof getSupabaseClient>;

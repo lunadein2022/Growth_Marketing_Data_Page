@@ -73,6 +73,13 @@ export type NaverMonthlyReport = {
   parseWarnings: string[];
 };
 
+export type NaverMonthlyImport = {
+  latestReport: NaverMonthlyReport;
+  monthlyReports: NaverMonthlyReport[];
+  sourceFiles: string[];
+  periodKeys: string[];
+};
+
 type ParsedFile = {
   fileName: string;
   rows: string[][];
@@ -138,17 +145,35 @@ export function isNaverMonthlyCandidate(file: File) {
 }
 
 export async function parseNaverMonthlyFiles(files: File[], importedAt: string): Promise<NaverMonthlyReport | null> {
+  return (await parseNaverMonthlyImport(files, importedAt))?.latestReport ?? null;
+}
+
+export async function parseNaverMonthlyImport(files: File[], importedAt: string): Promise<NaverMonthlyImport | null> {
   const naverFiles = files.filter(isNaverMonthlyCandidate);
   if (!naverFiles.length) return null;
 
   const parsedFiles = await Promise.all(naverFiles.map(readFileRows));
-  const period = inferPeriod(parsedFiles);
-  const trafficSources = buildTrafficSources(parsedFiles, period.periodKey);
-  const metricSnapshot = buildMetricSnapshot(parsedFiles, trafficSources, period.periodKey);
-  const requiredMetrics = buildRequiredMetrics(parsedFiles, metricSnapshot, period.periodKey);
-  const distributionRows = buildDistributionRows(parsedFiles, period.periodKey);
-  const rankingRows = buildRankingRows(parsedFiles, period.periodKey);
-  const validationRows = buildValidationRows(parsedFiles, requiredMetrics, period.periodKey);
+  const periodKeys = getImportedPeriodKeys(parsedFiles);
+  const monthlyReports = periodKeys.map((periodKey) => buildMonthlyReport(parsedFiles, periodKey, importedAt));
+  const latestReport = monthlyReports[monthlyReports.length - 1];
+
+  if (!latestReport) return null;
+
+  return {
+    latestReport,
+    monthlyReports,
+    sourceFiles: naverFiles.map((file) => file.name),
+    periodKeys,
+  };
+}
+
+function buildMonthlyReport(parsedFiles: ParsedFile[], periodKey: string, importedAt: string): NaverMonthlyReport {
+  const trafficSources = buildTrafficSources(parsedFiles, periodKey);
+  const metricSnapshot = buildMetricSnapshot(parsedFiles, trafficSources, periodKey);
+  const requiredMetrics = buildRequiredMetrics(parsedFiles, metricSnapshot, periodKey);
+  const distributionRows = buildDistributionRows(parsedFiles, periodKey);
+  const rankingRows = buildRankingRows(parsedFiles, periodKey);
+  const validationRows = buildValidationRows(parsedFiles, requiredMetrics, periodKey);
   const missingRequired = validationRows
     .filter((row) => row.type === "필수" && row.status !== "complete")
     .map((row) => row.label);
@@ -158,22 +183,21 @@ export async function parseNaverMonthlyFiles(files: File[], importedAt: string):
   const fileWarnings = parsedFiles.flatMap((file) => file.warnings);
 
   return {
-    id: `naver-monthly-${period.periodKey}`,
+    id: `naver-monthly-${periodKey}`,
     platform: "naver",
-    periodKey: period.periodKey,
-    periodLabel: period.periodLabel,
+    periodKey,
+    periodLabel: formatMonthLabel(periodKey),
     importedAt,
-    sourceFiles: naverFiles.map((file) => file.name),
+    sourceFiles: parsedFiles.filter((file) => fileCoversPeriod(file, periodKey)).map((file) => file.fileName),
     requiredMetrics,
     trafficSources,
     distributionRows,
     rankingRows,
     validationRows,
     metricSnapshot,
-    metricTimeSeries: buildMetricTimeSeries(parsedFiles, metricSnapshot, period.periodKey),
+    metricTimeSeries: buildMetricTimeSeries(parsedFiles, metricSnapshot, periodKey),
     parseWarnings: [
       ...fileWarnings,
-      ...buildPeriodMismatchWarnings(parsedFiles, period.periodKey),
       ...(missingRequired.length ? [`필수 지표 미수집: ${missingRequired.join(", ")}`] : []),
       ...(partialOptional.length ? [`선택 파일 데이터 행 없음: ${partialOptional.join(", ")}`] : []),
     ],
@@ -373,6 +397,48 @@ function extractMonthKeys(text: string) {
   return Array.from(keys);
 }
 
+function getImportedPeriodKeys(parsedFiles: ParsedFile[]) {
+  const keys = new Set<string>();
+
+  parsedFiles.forEach((file) => {
+    if (file.rangeStartKey && file.rangeEndKey) {
+      listMonthKeysBetween(file.rangeStartKey, file.rangeEndKey).forEach((key) => keys.add(key));
+      return;
+    }
+
+    if (file.periodKey) keys.add(file.periodKey);
+  });
+
+  if (!keys.size) {
+    const now = new Date();
+    keys.add(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  return Array.from(keys).sort();
+}
+
+function listMonthKeysBetween(startKey: string, endKey: string) {
+  const [startYear, startMonth] = startKey.split("-").map(Number);
+  const [endYear, endMonth] = endKey.split("-").map(Number);
+  const keys: string[] = [];
+
+  if (!startYear || !startMonth || !endYear || !endMonth) return keys;
+
+  let year = startYear;
+  let month = startMonth;
+
+  while (year < endYear || (year === endYear && month <= endMonth)) {
+    keys.push(`${year}-${String(month).padStart(2, "0")}`);
+    month += 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+
+  return keys;
+}
+
 function formatMonthLabel(periodKey: string) {
   const [year, month] = periodKey.split("-");
   return `${year}년 ${Number(month)}월`;
@@ -391,8 +457,12 @@ function normalize(value: string) {
   return value.toLowerCase().replace(/\s+/g, "").replace(/[()[\]{}·:_\-|/]/g, "");
 }
 
-function fileOrRowHas(parsedFiles: ParsedFile[], aliases: string[]) {
-  return parsedFiles.find((file) => aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))));
+function fileOrRowHas(parsedFiles: ParsedFile[], aliases: string[], periodKey?: string) {
+  return parsedFiles.find(
+    (file) =>
+      (!periodKey || fileCoversPeriod(file, periodKey)) &&
+      aliases.some((alias) => normalize(file.flatText).includes(normalize(alias))),
+  );
 }
 
 function rowHas(row: string[], aliases: string[]) {
@@ -490,7 +560,7 @@ function buildRequiredMetrics(parsedFiles: ParsedFile[], snapshot: NaverMetricSn
   return requiredDefs.map((def) => {
     const found = findMetricValue(parsedFiles, def.aliases, def.format, periodKey);
     const rawValue = snapshot[def.key];
-    const detectedFile = rawValue !== null ? found.sourceFileName ?? fileOrRowHas(parsedFiles, def.aliases)?.fileName : undefined;
+    const detectedFile = rawValue !== null ? found.sourceFileName ?? fileOrRowHas(parsedFiles, def.aliases, periodKey)?.fileName : undefined;
 
     return {
       key: def.key,
@@ -693,33 +763,6 @@ function hasOptionalDataRows(parsedFiles: ParsedFile[], def: { label: string; al
 
 function detectedRows(files: ParsedFile[]) {
   return files.flatMap((file) => file.rows.filter((row) => row.some(Boolean)));
-}
-
-function inferPeriod(parsedFiles: ParsedFile[]) {
-  const periodKeys = parsedFiles
-    .map((file) => file.rangeEndKey ?? file.periodKey)
-    .filter((key): key is string => Boolean(key))
-    .sort();
-  const now = new Date();
-  const fallbackKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const periodKey = periodKeys[periodKeys.length - 1] ?? fallbackKey;
-
-  return {
-    periodKey,
-    periodLabel: formatMonthLabel(periodKey),
-  };
-}
-
-function buildPeriodMismatchWarnings(parsedFiles: ParsedFile[], periodKey: string) {
-  const ignored = parsedFiles
-    .filter((file) => file.periodKey && !fileCoversPeriod(file, periodKey))
-    .map((file) => `${file.fileName}${file.periodLabel ? `(${file.periodLabel})` : ""}`);
-
-  if (!ignored.length) return [];
-
-  return [
-    `기준 월 ${formatMonthLabel(periodKey)}과 다른 단월 파일 제외: ${ignored.slice(0, 4).join(", ")}${ignored.length > 4 ? ` 외 ${ignored.length - 4}개` : ""}`,
-  ];
 }
 
 function buildMetricTimeSeries(
