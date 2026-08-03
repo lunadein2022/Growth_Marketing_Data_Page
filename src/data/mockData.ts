@@ -492,38 +492,17 @@ export const contentLabSnapshot: ContentLabSnapshot = {
     },
   ],
   publishingRules: [
-    {
-      id: "rule-1",
-      label: "틱톡 숏폼",
-      channel: "tiktok",
-      cadence: "매주",
-      days: ["월", "목", "금"],
-      time: "18:00",
-    },
-    {
-      id: "rule-2",
-      label: "유튜브 롱폼",
-      channel: "youtube",
-      cadence: "격주",
-      days: ["목"],
-      time: "08:00",
-    },
-    {
-      id: "rule-3",
-      label: "인스타 릴스",
-      channel: "instagram",
-      cadence: "매주",
-      days: ["수", "금"],
-      time: "17:00",
-    },
-    {
-      id: "rule-4",
-      label: "네이버 블로그 게시글",
-      channel: "naver",
-      cadence: "매주",
-      days: ["목"],
-      time: "10:00",
-    },
+    { id: "rule-1", label: "유튜브 쇼츠", channel: "youtube", cadence: "매주", days: ["월", "수", "금"], time: "12:00" },
+    { id: "rule-2", label: "유튜브 롱폼", channel: "youtube", cadence: "격주", days: ["목"], time: "08:00" },
+    { id: "rule-3", label: "인스타(둠둠) 릴스", channel: "instagram", cadence: "매주", days: ["화", "금"], time: "17:00" },
+    { id: "rule-4", label: "인스타(둠둠) 캐러셀", channel: "instagram", cadence: "매주", days: ["수"], time: "12:00" },
+    { id: "rule-5", label: "인스타(둠둠로그) 릴스", channel: "instagram", cadence: "매주", days: ["월", "목"], time: "19:00" },
+    { id: "rule-6", label: "인스타(둠둠로그) 캐러셀", channel: "instagram", cadence: "격주", days: ["금"], time: "13:00" },
+    { id: "rule-7", label: "링크드인", channel: "linkedin", cadence: "격주", days: ["화"], time: "09:00" },
+    { id: "rule-8", label: "틱톡", channel: "tiktok", cadence: "매주", days: ["월", "목", "금"], time: "18:00" },
+    { id: "rule-9", label: "네이버 블로그", channel: "naver", cadence: "매주", days: ["목"], time: "10:00" },
+    { id: "rule-10", label: "홈페이지(국문) 업데이트", channel: "website", cadence: "매월", days: ["월"], time: "10:00" },
+    { id: "rule-11", label: "홈페이지(영문) 업데이트", channel: "website", cadence: "매월", days: ["월"], time: "11:00" },
   ],
   campaigns: [
     {
@@ -925,21 +904,6 @@ contentLabSnapshot.ads = contentLabSnapshot.ads.map((ad) => {
     sourceContentId: ad.sourceContentId ?? source?.id,
   };
 });
-
-contentLabSnapshot.publishingRules = [
-  ...contentLabSnapshot.publishingRules,
-  ...Array.from({ length: 18 }, (_, index) => {
-    const channel = channelIds[index % channelIds.length];
-    return {
-      id: `rule-extra-${index + 1}`,
-      label: `${channelMeta[channel].label} 정기 콘텐츠 ${index + 1}`,
-      channel,
-      cadence: index % 3 === 0 ? "격주" : "매주",
-      days: ["월", "화", "수", "목", "금", "토", "일"].filter((_, dayIndex) => (dayIndex + index) % 3 === 0),
-      time: `${String(9 + (index % 9)).padStart(2, "0")}:00`,
-    };
-  }),
-];
 
 dataCenterSnapshot.sources = [
   ...dataCenterSnapshot.sources,

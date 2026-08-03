@@ -50,6 +50,16 @@ import {
   computePeriodComparison,
   type DateRange,
 } from "./services/periodComparison";
+import {
+  canUsePressBoard,
+  createPressRelease,
+  deletePressRelease,
+  listPressReleases,
+  pressImageUrl,
+  updatePressCoverage,
+  type PressCoverage,
+  type PressRelease,
+} from "./services/pressReleases";
 import { parseNaverMonthlyFiles, type NaverMonthlyReport } from "./services/naverMonthlyParser";
 import type {
   AdContent,
@@ -70,7 +80,7 @@ import type {
   TrendPoint,
 } from "./services/adapters/types";
 
-type AppView = "command" | "channels" | "content" | "data";
+type AppView = "command" | "channels" | "content" | "data" | "press";
 type ContentTab = "publishing" | "pipeline" | "campaigns" | "ads" | "archive";
 type PublishingCalendarMode = "week" | "month";
 type ChannelFilterGroup = { label: string; options: string[] };
@@ -154,6 +164,7 @@ const navItems: Array<{ id: AppView; label: string; icon: React.ElementType }> =
   { id: "channels", label: "Channels", icon: BarChart3 },
   { id: "content", label: "Content Lab", icon: FolderKanban },
   { id: "data", label: "Data Center", icon: Database },
+  { id: "press", label: "보도자료", icon: Megaphone },
 ];
 
 const contentTabs: Array<{ id: ContentTab; label: string; icon: React.ElementType }> = [
@@ -178,6 +189,27 @@ const channelFilterGroups: Record<Exclude<ChannelId, "all">, ChannelFilterGroup[
   naver: [],
   tiktok: [{ label: "범위", options: ["전체", "계정 성과", "영상 성과"] }],
 };
+
+const RULE_TIME_STORAGE_KEY = "dummdumm.ruleTimes";
+
+function readStoredRuleTimes(): Record<string, string> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(RULE_TIME_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredRuleTimes(times: Record<string, string>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RULE_TIME_STORAGE_KEY, JSON.stringify(times));
+  } catch {
+    /* ignore storage errors */
+  }
+}
 
 function readStoredChannelOrder(): Array<Exclude<ChannelId, "all">> {
   if (typeof window === "undefined") return [];
@@ -1078,6 +1110,8 @@ function App() {
                 onImportFiles={handleImportFiles}
               />
             )}
+
+            {activeView === "press" && <PressBoard authUser={authUser} />}
           </>
         )}
       </main>
@@ -2379,7 +2413,15 @@ function getPublishingCalendarEvents(data: ContentLabSnapshot, rangeStart: Date,
 }
 
 function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
-  const rulesPagination = usePaginatedItems(data.publishingRules);
+  const [ruleTimes, setRuleTimes] = useState<Record<string, string>>(() => readStoredRuleTimes());
+
+  const updateRuleTime = (id: string, time: string) => {
+    setRuleTimes((prev) => {
+      const next = { ...prev, [id]: time };
+      writeStoredRuleTimes(next);
+      return next;
+    });
+  };
   const [calendarMode, setCalendarMode] = useState<PublishingCalendarMode>("week");
   const [cursorDate, setCursorDate] = useState(TODAY);
 
@@ -2468,7 +2510,7 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
           </div>
         </div>
         <div className="rules-table">
-          {rulesPagination.pagedItems.map((rule) => (
+          {data.publishingRules.map((rule) => (
             <div className="rule-row" key={rule.id}>
               <div>
                 <ChannelBadge channel={rule.channel} />
@@ -2487,11 +2529,16 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
                   </button>
                 ))}
               </div>
-              <button className="time-chip">{rule.time}</button>
+              <input
+                type="time"
+                className="time-input"
+                value={ruleTimes[rule.id] ?? rule.time}
+                aria-label={`${rule.label} 발행 시간`}
+                onChange={(event) => updateRuleTime(rule.id, event.target.value)}
+              />
             </div>
           ))}
         </div>
-        <Pagination pagination={rulesPagination} />
       </section>
     </>
   );
@@ -4173,6 +4220,376 @@ function DataCenter({
           </table>
         </div>
         <Pagination pagination={mappingPagination} />
+      </section>
+    </div>
+  );
+}
+
+function formatPressDate(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}.${pad(date.getMonth() + 1)}.${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+const PRESS_OUTLETS: Array<{ key: keyof PressCoverage; label: string }> = [
+  { key: "moneytoday", label: "머니투데이" },
+  { key: "etnews", label: "전자신문" },
+  { key: "diginet", label: "디지넷" },
+];
+
+type PressView = { mode: "list" } | { mode: "write" } | { mode: "detail"; id: string };
+
+function PressBoard({ authUser }: { authUser: DashboardUser | null }) {
+  const configured = canUsePressBoard();
+  const [view, setView] = useState<PressView>({ mode: "list" });
+  const [releases, setReleases] = useState<PressRelease[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadReleases = () => {
+    if (!configured) {
+      setReleases([]);
+      return;
+    }
+    listPressReleases()
+      .then((rows) => {
+        setReleases(rows);
+        setError(null);
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "불러오기 실패");
+        setReleases([]);
+      });
+  };
+
+  useEffect(() => {
+    loadReleases();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configured]);
+
+  const toggleCoverage = (release: PressRelease, key: keyof PressCoverage) => {
+    const nextCoverage = { ...release.coverage, [key]: !release.coverage[key] };
+    setReleases((prev) => prev?.map((row) => (row.id === release.id ? { ...row, coverage: nextCoverage } : row)) ?? null);
+    updatePressCoverage(release.id, nextCoverage).catch(() => loadReleases());
+  };
+
+  const removeRelease = (release: PressRelease, options?: { back?: boolean }) => {
+    if (typeof window !== "undefined" && !window.confirm("이 보도자료를 삭제할까요?")) return;
+    setReleases((prev) => prev?.filter((row) => row.id !== release.id) ?? null);
+    deletePressRelease(release).catch(() => loadReleases());
+    if (options?.back) setView({ mode: "list" });
+  };
+
+  if (!configured) {
+    return (
+      <div className="screen-stack">
+        <section className="section-panel">
+          <div className="press-empty">Supabase 연결 후 보도자료 게시판을 사용할 수 있습니다.</div>
+        </section>
+      </div>
+    );
+  }
+
+  if (view.mode === "write") {
+    return (
+      <PressWrite
+        authUser={authUser}
+        onCancel={() => setView({ mode: "list" })}
+        onCreated={() => {
+          setView({ mode: "list" });
+          loadReleases();
+        }}
+      />
+    );
+  }
+
+  if (view.mode === "detail") {
+    const release = releases?.find((row) => row.id === view.id);
+    return (
+      <PressDetail
+        release={release}
+        onBack={() => setView({ mode: "list" })}
+        onDelete={() => release && removeRelease(release, { back: true })}
+        onToggle={toggleCoverage}
+      />
+    );
+  }
+
+  return (
+    <div className="screen-stack">
+      <section className="summary-band">
+        <div>
+          <span className="eyebrow">Press Room</span>
+          <h1>보도자료 게시판</h1>
+          <p>직접 작성해 게시판처럼 관리하세요. 사진 첨부 · 매체 보도 여부 체크 · 모든 기기에서 확인.</p>
+        </div>
+        <div className="summary-actions">
+          <button className="button primary" onClick={() => setView({ mode: "write" })}>
+            <Plus size={16} />
+            새 글
+          </button>
+        </div>
+      </section>
+
+      <section className="section-panel">
+        <div className="section-header">
+          <div>
+            <h2>보도자료 목록</h2>
+            <p>{releases ? `${releases.length}건` : "불러오는 중"}</p>
+          </div>
+        </div>
+        {error ? (
+          <div className="press-empty">불러오기 실패: {error}</div>
+        ) : !releases ? (
+          <div className="loading-panel slim">
+            <Loader2 size={18} className="spin" />
+            불러오는 중
+          </div>
+        ) : releases.length === 0 ? (
+          <div className="press-empty">아직 작성된 보도자료가 없습니다. '새 글'로 첫 보도자료를 등록하세요.</div>
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table press-table">
+              <thead>
+                <tr>
+                  <th>제목</th>
+                  <th>작성일</th>
+                  {PRESS_OUTLETS.map((outlet) => (
+                    <th key={outlet.key} className="press-outlet-col">
+                      {outlet.label}
+                    </th>
+                  ))}
+                  <th aria-label="삭제" />
+                </tr>
+              </thead>
+              <tbody>
+                {releases.map((release) => (
+                  <tr key={release.id}>
+                    <td>
+                      <button className="press-title-link" onClick={() => setView({ mode: "detail", id: release.id })}>
+                        {release.title}
+                        {release.images.length > 0 && <span className="press-img-count">사진 {release.images.length}</span>}
+                      </button>
+                    </td>
+                    <td className="press-date-cell">{formatPressDate(release.createdAt)}</td>
+                    {PRESS_OUTLETS.map((outlet) => (
+                      <td key={outlet.key} className="press-outlet-col">
+                        <input
+                          type="checkbox"
+                          className="press-check"
+                          checked={release.coverage[outlet.key]}
+                          onChange={() => toggleCoverage(release, outlet.key)}
+                          aria-label={`${release.title} ${outlet.label} 보도`}
+                        />
+                      </td>
+                    ))}
+                    <td className="press-actions-cell">
+                      <button
+                        type="button"
+                        className="icon-button mini"
+                        onClick={() => removeRelease(release)}
+                        aria-label="삭제"
+                      >
+                        <X size={16} />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function PressWrite({
+  authUser,
+  onCancel,
+  onCreated,
+}: {
+  authUser: DashboardUser | null;
+  onCancel: () => void;
+  onCreated: () => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [files, setFiles] = useState<File[]>([]);
+  const [previews, setPreviews] = useState<string[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+
+  const addFiles = (fileList: FileList | null) => {
+    if (!fileList?.length) return;
+    const picked = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
+    setFiles((prev) => [...prev, ...picked]);
+    setPreviews((prev) => [...prev, ...picked.map((file) => URL.createObjectURL(file))]);
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const removeAt = (index: number) => {
+    setFiles((prev) => prev.filter((_, current) => current !== index));
+    setPreviews((prev) => prev.filter((_, current) => current !== index));
+  };
+
+  const submit = async () => {
+    if (!title.trim() && !body.trim() && files.length === 0) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await createPressRelease({
+        title: title.trim() || "제목 없음",
+        body: body.trim(),
+        files,
+        createdBy: authUser?.email ?? null,
+      });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "등록 실패");
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="screen-stack">
+      <section className="section-panel">
+        <div className="section-header">
+          <div>
+            <h2>새 보도자료 작성</h2>
+            <p>제목 · 본문 · 사진</p>
+          </div>
+          <button className="button secondary small" onClick={onCancel}>
+            <ChevronLeft size={16} />
+            목록
+          </button>
+        </div>
+        <div className="press-form">
+          <input
+            className="press-title-input"
+            placeholder="제목"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+          <textarea
+            className="press-body-input"
+            placeholder="본문을 입력하세요"
+            rows={10}
+            value={body}
+            onChange={(event) => setBody(event.target.value)}
+          />
+          {previews.length > 0 && (
+            <div className="press-image-grid">
+              {previews.map((src, index) => (
+                <div className="press-thumb" key={index}>
+                  <img src={src} alt="첨부 이미지" />
+                  <button
+                    type="button"
+                    className="press-thumb-remove"
+                    onClick={() => removeAt(index)}
+                    aria-label="이미지 제거"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="press-form-actions">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              multiple
+              hidden
+              onChange={(event) => addFiles(event.target.files)}
+            />
+            <button type="button" className="button secondary" onClick={() => fileRef.current?.click()}>
+              <Upload size={16} />
+              사진 첨부
+            </button>
+            <button type="button" className="button primary" disabled={saving} onClick={submit}>
+              {saving ? <Loader2 size={16} className="spin" /> : <Plus size={16} />}
+              등록하기
+            </button>
+          </div>
+          {error && (
+            <div className="inline-note">
+              <AlertCircle size={16} />
+              {error}
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function PressDetail({
+  release,
+  onBack,
+  onDelete,
+  onToggle,
+}: {
+  release: PressRelease | undefined;
+  onBack: () => void;
+  onDelete: () => void;
+  onToggle: (release: PressRelease, key: keyof PressCoverage) => void;
+}) {
+  if (!release) {
+    return (
+      <div className="screen-stack">
+        <section className="section-panel">
+          <button className="button secondary small" onClick={onBack}>
+            <ChevronLeft size={16} />
+            목록
+          </button>
+          <div className="press-empty">보도자료를 찾을 수 없습니다.</div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="screen-stack">
+      <section className="section-panel press-detail">
+        <div className="section-header">
+          <button className="button secondary small" onClick={onBack}>
+            <ChevronLeft size={16} />
+            목록
+          </button>
+          <button className="button danger small" onClick={onDelete}>
+            <X size={16} />
+            삭제
+          </button>
+        </div>
+        <h1 className="press-detail-title">{release.title}</h1>
+        <div className="press-detail-meta">
+          {formatPressDate(release.createdAt)}
+          {release.createdBy ? ` · ${release.createdBy}` : ""}
+        </div>
+        <div className="press-detail-outlets">
+          {PRESS_OUTLETS.map((outlet) => (
+            <label key={outlet.key} className="press-outlet-toggle">
+              <input
+                type="checkbox"
+                className="press-check"
+                checked={release.coverage[outlet.key]}
+                onChange={() => onToggle(release, outlet.key)}
+              />
+              {outlet.label}
+            </label>
+          ))}
+        </div>
+        {release.body && <p className="press-detail-body">{release.body}</p>}
+        {release.images.length > 0 && (
+          <div className="press-detail-images">
+            {release.images.map((path, index) => (
+              <img key={index} src={pressImageUrl(path)} alt="첨부 이미지" />
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
