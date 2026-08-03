@@ -46,6 +46,11 @@ import {
   type BriefingContext,
 } from "./services/aiBriefings";
 import {
+  canUseAiBriefingHistory,
+  loadAiBriefingHistory,
+  saveAiBriefingHistory,
+} from "./services/aiBriefingHistory";
+import {
   canComparePeriods,
   computePeriodComparison,
   type DateRange,
@@ -63,6 +68,10 @@ import {
   type PressRelease,
 } from "./services/pressReleases";
 import { parseNaverMonthlyImport, type NaverMonthlyReport } from "./services/naverMonthlyParser";
+import {
+  canLoadSavedNaverMonthlyReports,
+  loadSavedNaverMonthlyReports,
+} from "./services/naverMonthlyReports";
 import type {
   AdContent,
   AiBriefing,
@@ -287,6 +296,31 @@ function formatCalendarTitle(date: Date, mode: PublishingCalendarMode) {
   return `${start.getMonth() + 1}/${start.getDate()} - ${end.getMonth() + 1}/${end.getDate()}`;
 }
 
+function getBriefingPeriodRange(periodMode: PeriodMode) {
+  if (periodMode === "monthly") {
+    return {
+      start: formatDateKey(startOfMonth(TODAY)),
+      end: formatDateKey(endOfMonth(TODAY)),
+    };
+  }
+
+  const start = startOfWeek(TODAY);
+  return {
+    start: formatDateKey(start),
+    end: formatDateKey(addDays(start, 6)),
+  };
+}
+
+function mergeBriefingHistory(incoming: AiBriefing[], current: AiBriefing[]) {
+  const byKey = new Map<string, AiBriefing>();
+  [...incoming, ...current].forEach((item) => {
+    const key = `${item.generatedAt}|${item.title}|${item.summary}`;
+    if (!byKey.has(key)) byKey.set(key, item);
+  });
+
+  return Array.from(byKey.values()).slice(0, 60);
+}
+
 function parseContentDate(value: string) {
   const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (isoMatch) return new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3]));
@@ -499,6 +533,7 @@ function applyNaverMonthlyReportToChannels(channels: ChannelView[], report: Nave
 
   return channels.map((channel) => {
     if (channel.id !== "naver") return channel;
+    const existingContent = channel.topContent.filter((item) => !item.id.startsWith("naver-ranking-"));
 
     return {
       ...channel,
@@ -513,10 +548,33 @@ function applyNaverMonthlyReportToChannels(channels: ChannelView[], report: Nave
           .map((item) => [item.label, report.metricTimeSeries[item.key]] as const)
           .filter(([, points]) => Boolean(points)),
       ),
-      topContent: rankingContent.length ? [...rankingContent, ...channel.topContent] : channel.topContent,
+      topContent: rankingContent.length ? [...rankingContent, ...existingContent] : existingContent,
       dataNote: `${report.periodLabel} 네이버 월간 파일 ${report.sourceFiles.length}개 기준입니다. 파일에서 찾은 값만 완료로 표시합니다.`,
     };
   });
+}
+
+function applySavedNaverReportsToDataCenter(data: DataCenterSnapshot, reports: NaverMonthlyReport[]): DataCenterSnapshot {
+  if (!reports.length) return data;
+
+  const latest = reports[reports.length - 1];
+  const completeRequired = latest.validationRows.filter((row) => row.type === "필수" && row.status === "complete").length;
+  const rangeLabel = formatNaverReportRangeLabel(reports);
+
+  return {
+    ...data,
+    sources: data.sources.map((source) => {
+      const sourceText = `${source.id} ${source.label} ${source.detail}`.toLowerCase();
+      if (!/naver|blog|네이버|블로그/.test(sourceText)) return source;
+
+      return {
+        ...source,
+        status: latest.parseWarnings.length ? ("partial" as const) : ("complete" as const),
+        lastSync: latest.importedAt,
+        detail: `Supabase 저장 데이터 ${rangeLabel} ${reports.length}개월 · 최신 ${latest.periodLabel} 필수 ${completeRequired}/6개`,
+      };
+    }),
+  };
 }
 
 function applyImportToContentLab(data: ContentLabSnapshot, result: DataFileImportResult): ContentLabSnapshot {
@@ -833,7 +891,17 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
   const [naverMonthlyReports, setNaverMonthlyReports] = useState<NaverMonthlyReport[]>([]);
+  const naverMonthlyReportRef = useRef<NaverMonthlyReport | null>(null);
+  const naverMonthlyReportsRef = useRef<NaverMonthlyReport[]>([]);
   const authConfigured = hasAuthConfig();
+
+  useEffect(() => {
+    naverMonthlyReportRef.current = naverMonthlyReport;
+  }, [naverMonthlyReport]);
+
+  useEffect(() => {
+    naverMonthlyReportsRef.current = naverMonthlyReports;
+  }, [naverMonthlyReports]);
 
   useEffect(() => {
     let mounted = true;
@@ -845,10 +913,12 @@ function App() {
       provider.getDataCenterSnapshot(periodMode),
     ]).then(([command, channelList, lab, data]) => {
       if (!mounted) return;
+      const savedNaverReport = naverMonthlyReportRef.current;
+      const savedNaverReports = naverMonthlyReportsRef.current;
       setSnapshot(command);
-      setChannels(channelList);
+      setChannels(savedNaverReport ? applyNaverMonthlyReportToChannels(channelList, savedNaverReport) : channelList);
       setContentLab(lab);
-      setDataCenter(data);
+      setDataCenter(savedNaverReports.length ? applySavedNaverReportsToDataCenter(data, savedNaverReports) : data);
     });
 
     return () => {
@@ -857,6 +927,57 @@ function App() {
   }, [periodMode]);
 
   useEffect(() => subscribeToAuthUser(setAuthUser), []);
+
+  useEffect(() => {
+    if (!authUser || !canLoadSavedNaverMonthlyReports()) return;
+
+    let mounted = true;
+
+    loadSavedNaverMonthlyReports()
+      .then((reports) => {
+        if (!mounted || !reports.length) return;
+        setNaverMonthlyReports((current) => mergeNaverMonthlyReports(current, reports));
+        setNaverMonthlyReport(reports[reports.length - 1]);
+      })
+      .catch((error) => {
+        console.warn("Saved Naver monthly reports could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid]);
+
+  useEffect(() => {
+    if (!authUser || !canUseAiBriefingHistory()) return;
+
+    let mounted = true;
+
+    loadAiBriefingHistory()
+      .then((history) => {
+        if (!mounted || !history.length) return;
+        setBriefingHistory((current) => mergeBriefingHistory(history, current));
+      })
+      .catch((error) => {
+        console.warn("Saved AI briefing history could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid]);
+
+  useEffect(() => {
+    if (!naverMonthlyReport) return;
+
+    setChannels((current) => applyNaverMonthlyReportToChannels(current, naverMonthlyReport));
+  }, [naverMonthlyReport]);
+
+  useEffect(() => {
+    if (!naverMonthlyReports.length) return;
+
+    setDataCenter((current) => (current ? applySavedNaverReportsToDataCenter(current, naverMonthlyReports) : current));
+  }, [naverMonthlyReports]);
 
   const selectedChannelView = channels.find((channel) => channel.id === selectedChannel) ?? channels[0];
 
@@ -939,8 +1060,17 @@ function App() {
         nextBriefing = await provider.generateBriefing(request);
       }
 
-      setBriefing(nextBriefing);
-      setBriefingHistory((current) => [nextBriefing, ...current]);
+      let historyBriefing = nextBriefing;
+      if (authUser && canUseAiBriefingHistory()) {
+        try {
+          historyBriefing = await saveAiBriefingHistory(nextBriefing, request, getBriefingPeriodRange(periodMode));
+        } catch (error) {
+          console.warn("AI briefing history could not be saved.", error);
+        }
+      }
+
+      setBriefing(historyBriefing);
+      setBriefingHistory((current) => mergeBriefingHistory([historyBriefing], current));
     } finally {
       setGenerating(false);
     }

@@ -19,24 +19,62 @@ create index if not exists idx_press_releases_org_created on press_releases(org_
 
 alter table press_releases enable row level security;
 
-create policy press_releases_member_all on press_releases
-  for all
-  using (public.is_org_member(org_id))
-  with check (public.is_org_member(org_id));
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'press_releases'
+      and policyname = 'press_releases_member_all'
+  ) then
+    create policy press_releases_member_all on press_releases
+      for all
+      using (public.is_org_member(org_id))
+      with check (public.is_org_member(org_id));
+  end if;
+end $$;
 
 -- Public bucket for press images: readable via public URL, writable by auth users.
 insert into storage.buckets (id, name, public)
 values ('press-images', 'press-images', true)
 on conflict (id) do nothing;
 
-create policy "press_images_public_read" on storage.objects
-  for select
-  using (bucket_id = 'press-images');
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'storage'
+      and tablename = 'objects'
+      and policyname = 'press_images_public_read'
+  ) then
+    create policy "press_images_public_read" on storage.objects
+      for select
+      using (bucket_id = 'press-images');
+  end if;
 
-create policy "press_images_auth_write" on storage.objects
-  for insert to authenticated
-  with check (bucket_id = 'press-images');
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'storage'
+      and tablename = 'objects'
+      and policyname = 'press_images_auth_write'
+  ) then
+    create policy "press_images_auth_write" on storage.objects
+      for insert to authenticated
+      with check (bucket_id = 'press-images');
+  end if;
 
-create policy "press_images_auth_delete" on storage.objects
-  for delete to authenticated
-  using (bucket_id = 'press-images');
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'storage'
+      and tablename = 'objects'
+      and policyname = 'press_images_auth_delete'
+  ) then
+    create policy "press_images_auth_delete" on storage.objects
+      for delete to authenticated
+      using (bucket_id = 'press-images');
+  end if;
+end $$;

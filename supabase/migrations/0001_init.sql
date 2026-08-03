@@ -381,36 +381,81 @@ begin
   end loop;
 
   foreach t in array member_crud loop
-    execute format($f$
-      create policy %1$I_member_all on %1$I
-        for all
-        using (public.is_org_member(org_id))
-        with check (public.is_org_member(org_id));
-    $f$, t);
+    if not exists (
+      select 1
+      from pg_policies
+      where schemaname = 'public'
+        and tablename = t
+        and policyname = format('%s_member_all', t)
+    ) then
+      execute format($f$
+        create policy %1$I_member_all on %1$I
+          for all
+          using (public.is_org_member(org_id))
+          with check (public.is_org_member(org_id));
+      $f$, t);
+    end if;
   end loop;
 
   foreach t in array admin_write loop
-    execute format($f$
-      create policy %1$I_member_read on %1$I
-        for select using (public.is_org_member(org_id));
-    $f$, t);
-    execute format($f$
-      create policy %1$I_admin_write on %1$I
-        for all
-        using (public.is_org_admin(org_id))
-        with check (public.is_org_admin(org_id));
-    $f$, t);
+    if not exists (
+      select 1
+      from pg_policies
+      where schemaname = 'public'
+        and tablename = t
+        and policyname = format('%s_member_read', t)
+    ) then
+      execute format($f$
+        create policy %1$I_member_read on %1$I
+          for select using (public.is_org_member(org_id));
+      $f$, t);
+    end if;
+
+    if not exists (
+      select 1
+      from pg_policies
+      where schemaname = 'public'
+        and tablename = t
+        and policyname = format('%s_admin_write', t)
+    ) then
+      execute format($f$
+        create policy %1$I_admin_write on %1$I
+          for all
+          using (public.is_org_admin(org_id))
+          with check (public.is_org_admin(org_id));
+      $f$, t);
+    end if;
   end loop;
 end $$;
 
 -- organizations: keyed by id (no org_id column) — members read, admins write.
 alter table organizations enable row level security;
-create policy organizations_member_read on organizations
-  for select using (public.is_org_member(id));
-create policy organizations_admin_write on organizations
-  for all
-  using (public.is_org_admin(id))
-  with check (public.is_org_admin(id));
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'organizations'
+      and policyname = 'organizations_member_read'
+  ) then
+    create policy organizations_member_read on organizations
+      for select using (public.is_org_member(id));
+  end if;
+
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'public'
+      and tablename = 'organizations'
+      and policyname = 'organizations_admin_write'
+  ) then
+    create policy organizations_admin_write on organizations
+      for all
+      using (public.is_org_admin(id))
+      with check (public.is_org_admin(id));
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- Storage bucket for raw file imports (replaces Firebase Storage)
@@ -422,10 +467,29 @@ on conflict (id) do nothing;
 -- Any authenticated org member may read/write objects under file-imports/.
 -- Fine-grained per-org path scoping is enforced in application code (see
 -- src/services/supabaseFileImports.ts) and can be tightened here later.
-create policy "file_imports_authenticated_read" on storage.objects
-  for select to authenticated
-  using (bucket_id = 'file-imports');
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'storage'
+      and tablename = 'objects'
+      and policyname = 'file_imports_authenticated_read'
+  ) then
+    create policy "file_imports_authenticated_read" on storage.objects
+      for select to authenticated
+      using (bucket_id = 'file-imports');
+  end if;
 
-create policy "file_imports_authenticated_write" on storage.objects
-  for insert to authenticated
-  with check (bucket_id = 'file-imports');
+  if not exists (
+    select 1
+    from pg_policies
+    where schemaname = 'storage'
+      and tablename = 'objects'
+      and policyname = 'file_imports_authenticated_write'
+  ) then
+    create policy "file_imports_authenticated_write" on storage.objects
+      for insert to authenticated
+      with check (bucket_id = 'file-imports');
+  end if;
+end $$;
