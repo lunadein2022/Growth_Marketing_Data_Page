@@ -51,6 +51,12 @@ import {
   saveAiBriefingHistory,
 } from "./services/aiBriefingHistory";
 import {
+  FILE_IMPORT_CHANNEL_LABELS,
+  FILE_IMPORT_EXTENSIONS,
+  inferFileImportChannel,
+  type FileImportChannel,
+} from "./services/dataConnections";
+import {
   canComparePeriods,
   computePeriodComparison,
   type DateRange,
@@ -115,12 +121,6 @@ type ReuseRecommendation = {
   targets: Array<Exclude<ChannelId, "all">>;
   reason: string;
 };
-type FileImportChannel = "linkedin" | "tiktok" | "naver";
-const FILE_IMPORT_CHANNEL_LABELS: Record<FileImportChannel, string> = {
-  linkedin: "LinkedIn",
-  tiktok: "TikTok",
-  naver: "Naver Blog",
-};
 type ParsedFileImportItem = {
   id: string;
   sourceFileName: string;
@@ -166,7 +166,6 @@ const PAGE_SIZE = 10;
 const CHANNEL_ORDER_STORAGE_KEY = "dummdumm-channel-order";
 const TODAY = new Date(2026, 6, 29);
 const WEEKDAY_LABELS = ["월", "화", "수", "목", "금", "토", "일"];
-const FILE_IMPORT_EXTENSIONS = [".xlsx", ".xls", ".csv", ".tsv"];
 
 const statusLabel: Record<DataStatus, string> = {
   complete: "정상",
@@ -352,14 +351,6 @@ function cleanImportedTitle(fileName: string) {
     .trim();
 }
 
-function inferImportChannel(fileName: string): FileImportChannel | null {
-  const source = fileName.toLowerCase();
-  if (/linkedin|링크드인/.test(source)) return "linkedin";
-  if (/tiktok|틱톡/.test(source)) return "tiktok";
-  if (/naver|네이버|blog|블로그|원고|후기|추천|조회수|유입|순방문|방문|재방문|평균\s*사용|성연령|성\/연령|국가|공감|댓글|순위/.test(source)) return "naver";
-  return null;
-}
-
 function getParsedImportMetric(channel: FileImportChannel, seed: number) {
   if (channel === "linkedin") {
     return { metricLabel: "노출", metricValue: (6800 + seed * 37).toLocaleString("ko-KR") };
@@ -374,7 +365,7 @@ function getParsedImportMetric(channel: FileImportChannel, seed: number) {
 
 function buildDataFileImportResult(files: File[]): DataFileImportResult {
   const items = files.flatMap((file, index): ParsedFileImportItem[] => {
-    const channel = inferImportChannel(file.name);
+    const channel = inferFileImportChannel(file.name);
     if (!channel) return [];
 
     const metric = getParsedImportMetric(channel, Math.max(1, Math.round(file.size / 1024) + index));
@@ -4215,8 +4206,8 @@ function DataCenter({
       return;
     }
 
-    const unsupportedChannelFiles = acceptedFiles.filter((file) => !inferImportChannel(file.name));
-    const importableFiles = acceptedFiles.filter((file) => inferImportChannel(file.name));
+    const unsupportedChannelFiles = acceptedFiles.filter((file) => !inferFileImportChannel(file.name));
+    const importableFiles = acceptedFiles.filter((file) => inferFileImportChannel(file.name));
 
     if (!importableFiles.length) {
       setImportNotice(null);

@@ -11,6 +11,11 @@ import type {
   PeriodMode,
   ChannelId,
 } from "../services/adapters/types";
+import {
+  DATA_CONNECTION_ISSUES,
+  DATA_CONNECTION_MAPPING_ROWS,
+  DATA_CONNECTION_SOURCES,
+} from "../services/dataConnections";
 
 export const channelMeta: Record<Exclude<ChannelId, "all">, { label: string; short: string; color: string }> = {
   youtube: { label: "YouTube", short: "Y", color: "#ef4444" },
@@ -654,106 +659,9 @@ export const contentLabSnapshot: ContentLabSnapshot = {
 };
 
 export const dataCenterSnapshot: DataCenterSnapshot = {
-  sources: [
-    {
-      id: "google-youtube",
-      label: "YouTube Analytics API",
-      kind: "api",
-      connectionGroup: "api",
-      channels: ["본계 Shorts", "본계 Longform"],
-      cadence: "일 1회 자동 동기화",
-      status: "complete",
-      lastSync: "2026.07.28 09:10",
-      detail: "본계 Shorts/롱폼 성과를 API로 분리 수집합니다.",
-    },
-    {
-      id: "meta-instagram",
-      label: "Instagram Graph API",
-      kind: "api",
-      connectionGroup: "api",
-      channels: ["회사 본계 Carousel/Reels", "둠둠로그 Carousel/Reels"],
-      cadence: "일 1회 자동 동기화",
-      status: "partial",
-      lastSync: "2026.07.28 08:40",
-      detail: "2개 계정과 포맷별 성과를 API로 수집합니다. 릴스 일부 지표는 권한에 따라 조건부입니다.",
-    },
-    {
-      id: "google-website",
-      label: "GA4 + Search Console",
-      kind: "api",
-      connectionGroup: "api",
-      channels: ["Website KR", "Website EN"],
-      cadence: "일 1회 자동 동기화",
-      status: "complete",
-      lastSync: "2026.07.28 09:00",
-      detail: "국문/영문 속성을 분리해 유입, 검색어, 전환 신호를 API로 수집합니다.",
-    },
-    {
-      id: "linkedin-file",
-      label: "LinkedIn 파일 업로드",
-      kind: "file",
-      connectionGroup: "file",
-      channels: ["게시물 성과 파일"],
-      cadence: "월 1회 또는 필요 시 수동 업로드",
-      status: "partial",
-      lastSync: "2026.07.26 18:00",
-      detail: "LinkedIn은 파일 첨부로 게시물 성과를 누적합니다.",
-    },
-    {
-      id: "naver-file",
-      label: "Naver Blog 파일 업로드",
-      kind: "file",
-      connectionGroup: "file",
-      channels: ["필수 지표", "유입 분석", "분포/순위"],
-      cadence: "월 1회 수동 업로드",
-      status: "partial",
-      lastSync: "2026.07.25 10:30",
-      detail: "조회수, 유입분석, 순방문자수, 방문 횟수, 평균 사용 시간, 재방문율을 월간 파일로 적재합니다.",
-    },
-    {
-      id: "tiktok-file",
-      label: "TikTok 파일 업로드",
-      kind: "file",
-      connectionGroup: "file",
-      channels: ["게시물 성과 파일"],
-      cadence: "게시물 운영 시작 후 수동 업로드",
-      status: "not_uploaded",
-      lastSync: "아직 없음",
-      detail: "현재 게시물이 없어 데이터는 받지 않습니다. 업로드 구조만 준비되어 있습니다.",
-    },
-  ],
-  mappingRows: [
-    { raw: "YouTube Analytics: subscribersGained", metric: "subscribers", transform: "계정 현재값 + 기간 증가분", platform: "YouTube" },
-    { raw: "YouTube Analytics: views/watchTime/averageViewDuration", metric: "views_watch_time_avg_view", transform: "Shorts/롱폼 포맷별 집계", platform: "YouTube" },
-    { raw: "Instagram Graph API: followers/reach/views/saves/shares", metric: "instagram_account_metrics", transform: "계정 + 포맷별 집계", platform: "Instagram" },
-    { raw: "GA4: users/sessions/events", metric: "website_behavior", transform: "KR/EN 속성별 집계", platform: "Website" },
-    { raw: "Search Console: queries/clicks/impressions", metric: "website_search_visibility", transform: "국문/영문 검색 성과 분리", platform: "Website" },
-    { raw: "조회수", metric: "blog_views", transform: "숫자", platform: "Naver Blog" },
-    { raw: "유입분석", metric: "traffic_sources", transform: "유입원별 분해", platform: "Naver Blog" },
-    { raw: "순방문자수", metric: "unique_visitors", transform: "숫자", platform: "Naver Blog" },
-    { raw: "방문 횟수", metric: "visit_count", transform: "숫자", platform: "Naver Blog" },
-    { raw: "평균 사용 시간", metric: "avg_duration_seconds", transform: "시간 → 초", platform: "Naver Blog" },
-    { raw: "재방문율", metric: "return_visit_rate", transform: "퍼센트", platform: "Naver Blog" },
-    { raw: "신규 팔로워 수", metric: "new_followers", transform: "숫자", platform: "LinkedIn" },
-    { raw: "동영상 조회수", metric: "video_views", transform: "숫자", platform: "TikTok" },
-  ],
-  issues: [
-    {
-      severity: "warning",
-      title: "TikTok 게시물 없음",
-      detail: "TikTok은 파일 업로드형 채널이지만 아직 게시물이 없어 성과 수집 대상에서 제외됩니다.",
-    },
-    {
-      severity: "info",
-      title: "LinkedIn 파일 업로드형",
-      detail: "LinkedIn은 API 자동 동기화 대상이 아니며, 업로드 파일의 원본 값을 기준으로 지표를 저장합니다.",
-    },
-    {
-      severity: "warning",
-      title: "Instagram 릴스 반복 재생 조건부",
-      detail: "Instagram은 API 연결형입니다. 릴스 일부 지표는 Graph API 권한과 응답 가능 여부에 따라 표시합니다.",
-    },
-  ],
+  sources: DATA_CONNECTION_SOURCES,
+  mappingRows: DATA_CONNECTION_MAPPING_ROWS,
+  issues: DATA_CONNECTION_ISSUES,
 };
 
 const channelIds: Array<Exclude<ChannelId, "all">> = ["youtube", "instagram", "website", "linkedin", "naver", "tiktok"];
