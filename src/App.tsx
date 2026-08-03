@@ -57,6 +57,11 @@ import {
   type FileImportChannel,
 } from "./services/dataConnections";
 import {
+  applyDataCenterSyncStatus,
+  canLoadDataCenterSyncStatus,
+  loadDataCenterSyncStatus,
+} from "./services/dataCenterSyncStatus";
+import {
   canSyncYoutubeAnalytics,
   syncYoutubeAnalytics,
   type YoutubeSyncState,
@@ -939,6 +944,25 @@ function App() {
   useEffect(() => subscribeToAuthUser(setAuthUser), []);
 
   useEffect(() => {
+    if (!authUser || !canLoadDataCenterSyncStatus()) return;
+
+    let mounted = true;
+
+    loadDataCenterSyncStatus()
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        setDataCenter((current) => (current ? applyDataCenterSyncStatus(current, patch) : current));
+      })
+      .catch((error) => {
+        console.warn("Saved Data Center sync status could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, periodMode, dataCenter ? "ready" : "empty"]);
+
+  useEffect(() => {
     if (!authUser || !canLoadSavedNaverMonthlyReports()) return;
 
     let mounted = true;
@@ -1189,7 +1213,8 @@ function App() {
         periodMode,
         startDate: range.start,
         endDate: range.end,
-        maxVideos: 50,
+        maxVideos: 300,
+        includeUploadBackfill: true,
       });
       setYoutubeSyncResult(result);
       setDataCenter((current) =>
@@ -1202,7 +1227,7 @@ function App() {
                       ...source,
                       status: "complete",
                       lastSync: formatImportTimestamp(),
-                      detail: `${result.channelTitle} ${result.periodStart}~${result.periodEnd} · 영상 ${result.videosSynced}개 · 일별 ${result.dailyPoints}개 저장`,
+                      detail: `${result.channelTitle} ${result.periodStart}~${result.periodEnd} · 총 영상 ${result.videosSynced}개 저장 · 기간 성과 ${result.videosWithPeriodMetrics ?? 0}개`,
                     }
                   : source,
               ),
@@ -4355,7 +4380,7 @@ function DataCenter({
             {source.id === "google-youtube" && youtubeSyncResult && (
               <small className={`sync-note ${youtubeSyncResult.status}`}>
                 {youtubeSyncResult.status === "complete"
-                  ? `${youtubeSyncResult.videosSynced}개 영상 · ${youtubeSyncResult.dailyPoints}일 지표 저장`
+                  ? `${youtubeSyncResult.videosSynced}개 영상 저장 · 기간 성과 ${youtubeSyncResult.videosWithPeriodMetrics ?? 0}개 · ${youtubeSyncResult.dailyPoints}일 지표`
                   : youtubeSyncResult.message}
               </small>
             )}

@@ -6,6 +6,7 @@ export type YoutubeSyncRequest = {
   startDate: string;
   endDate: string;
   maxVideos?: number;
+  includeUploadBackfill?: boolean;
 };
 
 export type YoutubeSyncResult = {
@@ -17,6 +18,8 @@ export type YoutubeSyncResult = {
   rowsRead: number;
   rowsWritten: number;
   videosSynced: number;
+  videosWithPeriodMetrics?: number;
+  videoLimit?: number;
   dailyPoints: number;
   syncRunId: string;
   metrics: {

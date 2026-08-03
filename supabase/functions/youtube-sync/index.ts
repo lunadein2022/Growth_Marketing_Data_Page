@@ -29,6 +29,7 @@ type SyncRequest = {
   startDate?: string;
   endDate?: string;
   maxVideos?: number;
+  includeUploadBackfill?: boolean;
 };
 
 type GoogleTokenResponse = {
@@ -123,7 +124,8 @@ function parseRequestRange(payload: SyncRequest) {
     periodMode,
     startDate: isDateKey(payload.startDate) ? payload.startDate : fallback.startDate,
     endDate: isDateKey(payload.endDate) ? payload.endDate : fallback.endDate,
-    maxVideos: Math.min(Math.max(Number(payload.maxVideos ?? 50), 1), 50),
+    maxVideos: Math.min(Math.max(Number(payload.maxVideos ?? 200), 1), 500),
+    includeUploadBackfill: payload.includeUploadBackfill !== false,
   };
 }
 
@@ -200,11 +202,16 @@ async function fetchChannel(accessToken: string) {
   return channel;
 }
 
-async function fetchUploadVideoIds(accessToken: string, playlistId: string, startDate: string, endDate: string, maxVideos: number) {
+async function fetchUploadVideoIds(
+  accessToken: string,
+  playlistId: string,
+  maxVideos: number,
+  bounds?: { startDate: string; endDate: string },
+) {
   const ids: string[] = [];
   let pageToken = "";
-  const startTime = new Date(`${startDate}T00:00:00Z`).getTime();
-  const endTime = new Date(`${endDate}T23:59:59Z`).getTime();
+  const startTime = bounds ? new Date(`${bounds.startDate}T00:00:00Z`).getTime() : null;
+  const endTime = bounds ? new Date(`${bounds.endDate}T23:59:59Z`).getTime() : null;
 
   while (ids.length < maxVideos) {
     const data = await googleGet<PlaylistItemsResponse>(
@@ -221,7 +228,9 @@ async function fetchUploadVideoIds(accessToken: string, playlistId: string, star
       const videoId = item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId;
       const publishedAt = item.contentDetails?.videoPublishedAt ?? item.snippet?.publishedAt;
       const publishedTime = publishedAt ? new Date(publishedAt).getTime() : 0;
-      if (videoId && publishedTime >= startTime && publishedTime <= endTime) ids.push(videoId);
+      const inBounds =
+        startTime === null || endTime === null || (publishedTime >= startTime && publishedTime <= endTime);
+      if (videoId && inBounds) ids.push(videoId);
     }
 
     if (!data.nextPageToken || ids.length >= maxVideos) break;
@@ -233,15 +242,20 @@ async function fetchUploadVideoIds(accessToken: string, playlistId: string, star
 
 async function fetchVideos(accessToken: string, ids: string[]) {
   if (!ids.length) return [];
-  const data = await googleGet<VideoListResponse>(
-    buildUrl(`${YOUTUBE_DATA_BASE}/videos`, {
-      part: "snippet,contentDetails,statistics",
-      id: ids.join(","),
-      maxResults: ids.length,
-    }),
-    accessToken,
-  );
-  return data.items ?? [];
+  const videos: YouTubeVideoResource[] = [];
+  for (let index = 0; index < ids.length; index += 50) {
+    const chunk = ids.slice(index, index + 50);
+    const data = await googleGet<VideoListResponse>(
+      buildUrl(`${YOUTUBE_DATA_BASE}/videos`, {
+        part: "snippet,contentDetails,statistics",
+        id: chunk.join(","),
+        maxResults: chunk.length,
+      }),
+      accessToken,
+    );
+    videos.push(...(data.items ?? []));
+  }
+  return videos;
 }
 
 async function fetchAnalytics(accessToken: string, params: Record<string, string | number>) {
@@ -329,7 +343,7 @@ Deno.serve(async (req) => {
     payload = {};
   }
 
-  const { periodMode, startDate, endDate, maxVideos } = parseRequestRange(payload);
+  const { periodMode, startDate, endDate, maxVideos, includeUploadBackfill } = parseRequestRange(payload);
   let syncRunId = "";
   let accountId = "";
 
@@ -376,7 +390,12 @@ Deno.serve(async (req) => {
     const analyticsVideoIds = videoAnalyticsRows.map((row) => String(row.video ?? "")).filter(Boolean);
     const uploadsPlaylist = channel.contentDetails?.relatedPlaylists?.uploads;
     const uploadVideoIds = uploadsPlaylist
-      ? await fetchUploadVideoIds(accessToken, uploadsPlaylist, startDate, endDate, maxVideos)
+      ? await fetchUploadVideoIds(
+          accessToken,
+          uploadsPlaylist,
+          maxVideos,
+          includeUploadBackfill ? undefined : { startDate, endDate },
+        )
       : [];
     const videoIds = Array.from(new Set([...analyticsVideoIds, ...uploadVideoIds])).slice(0, maxVideos);
     const videos = await fetchVideos(accessToken, videoIds);
@@ -478,6 +497,7 @@ Deno.serve(async (req) => {
       const postId = postByPlatformId.get(video.id);
       if (!postId) return [];
       const analytics = analyticsByVideo.get(video.id);
+      if (!analytics) return [];
       const durationSeconds = parseIsoDurationSeconds(video.contentDetails?.duration);
       return [
         {
@@ -534,6 +554,8 @@ Deno.serve(async (req) => {
       rowsRead,
       rowsWritten,
       videosSynced: videos.length,
+      videosWithPeriodMetrics: videoAnalyticsRows.length,
+      videoLimit: maxVideos,
       dailyPoints: dailyRows.length,
       syncRunId,
       metrics: channelMetrics,
