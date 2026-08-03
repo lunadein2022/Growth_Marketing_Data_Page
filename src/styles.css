@@ -4119,3 +4119,8 @@ h1 {
   border-radius: var(--radius);
   display: block;
 }
+
+.press-detail-actions {
+  display: flex;
+  gap: 8px;
+}

@@ -57,6 +57,8 @@ import {
   listPressReleases,
   pressImageUrl,
   updatePressCoverage,
+  updatePressRelease,
+  uploadPressImages,
   type PressCoverage,
   type PressRelease,
 } from "./services/pressReleases";
@@ -4238,7 +4240,11 @@ const PRESS_OUTLETS: Array<{ key: keyof PressCoverage; label: string }> = [
   { key: "diginet", label: "디지넷" },
 ];
 
-type PressView = { mode: "list" } | { mode: "write" } | { mode: "detail"; id: string };
+type PressView =
+  | { mode: "list" }
+  | { mode: "write" }
+  | { mode: "detail"; id: string }
+  | { mode: "edit"; id: string };
 
 function PressBoard({ authUser }: { authUser: DashboardUser | null }) {
   const configured = canUsePressBoard();
@@ -4290,13 +4296,16 @@ function PressBoard({ authUser }: { authUser: DashboardUser | null }) {
     );
   }
 
-  if (view.mode === "write") {
+  if (view.mode === "write" || view.mode === "edit") {
+    const back: PressView = view.mode === "edit" ? { mode: "detail", id: view.id } : { mode: "list" };
+    const editing = view.mode === "edit" ? releases?.find((row) => row.id === view.id) : undefined;
     return (
       <PressWrite
         authUser={authUser}
-        onCancel={() => setView({ mode: "list" })}
-        onCreated={() => {
-          setView({ mode: "list" });
+        editing={editing}
+        onCancel={() => setView(back)}
+        onSaved={() => {
+          setView(back);
           loadReleases();
         }}
       />
@@ -4309,6 +4318,7 @@ function PressBoard({ authUser }: { authUser: DashboardUser | null }) {
       <PressDetail
         release={release}
         onBack={() => setView({ mode: "list" })}
+        onEdit={() => setView({ mode: "edit", id: view.id })}
         onDelete={() => release && removeRelease(release, { back: true })}
         onToggle={toggleCoverage}
       />
@@ -4406,15 +4416,20 @@ function PressBoard({ authUser }: { authUser: DashboardUser | null }) {
 
 function PressWrite({
   authUser,
+  editing,
   onCancel,
-  onCreated,
+  onSaved,
 }: {
   authUser: DashboardUser | null;
+  editing?: PressRelease;
   onCancel: () => void;
-  onCreated: () => void;
+  onSaved: () => void;
 }) {
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
+  const isEdit = Boolean(editing);
+  const [title, setTitle] = useState(editing?.title ?? "");
+  const [body, setBody] = useState(editing?.body ?? "");
+  const [existingImages, setExistingImages] = useState<string[]>(editing?.images ?? []);
+  const [removedImages, setRemovedImages] = useState<string[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
@@ -4429,25 +4444,41 @@ function PressWrite({
     if (fileRef.current) fileRef.current.value = "";
   };
 
-  const removeAt = (index: number) => {
+  const removeNewAt = (index: number) => {
     setFiles((prev) => prev.filter((_, current) => current !== index));
     setPreviews((prev) => prev.filter((_, current) => current !== index));
   };
 
+  const removeExisting = (path: string) => {
+    setExistingImages((prev) => prev.filter((current) => current !== path));
+    setRemovedImages((prev) => [...prev, path]);
+  };
+
   const submit = async () => {
-    if (!title.trim() && !body.trim() && files.length === 0) return;
+    if (!title.trim() && !body.trim() && files.length === 0 && existingImages.length === 0) return;
     setSaving(true);
     setError(null);
     try {
-      await createPressRelease({
-        title: title.trim() || "제목 없음",
-        body: body.trim(),
-        files,
-        createdBy: authUser?.email ?? null,
-      });
-      onCreated();
+      if (editing) {
+        const newPaths = files.length ? await uploadPressImages(editing.id, files) : [];
+        await updatePressRelease({
+          id: editing.id,
+          title: title.trim() || "제목 없음",
+          body: body.trim(),
+          images: [...existingImages, ...newPaths],
+          removedImages,
+        });
+      } else {
+        await createPressRelease({
+          title: title.trim() || "제목 없음",
+          body: body.trim(),
+          files,
+          createdBy: authUser?.email ?? null,
+        });
+      }
+      onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "등록 실패");
+      setError(err instanceof Error ? err.message : isEdit ? "수정 실패" : "등록 실패");
       setSaving(false);
     }
   };
@@ -4457,12 +4488,12 @@ function PressWrite({
       <section className="section-panel">
         <div className="section-header">
           <div>
-            <h2>새 보도자료 작성</h2>
+            <h2>{isEdit ? "보도자료 수정" : "새 보도자료 작성"}</h2>
             <p>제목 · 본문 · 사진</p>
           </div>
           <button className="button secondary small" onClick={onCancel}>
             <ChevronLeft size={16} />
-            목록
+            {isEdit ? "취소" : "목록"}
           </button>
         </div>
         <div className="press-form">
@@ -4479,15 +4510,28 @@ function PressWrite({
             value={body}
             onChange={(event) => setBody(event.target.value)}
           />
-          {previews.length > 0 && (
+          {(existingImages.length > 0 || previews.length > 0) && (
             <div className="press-image-grid">
+              {existingImages.map((path) => (
+                <div className="press-thumb" key={path}>
+                  <img src={pressImageUrl(path)} alt="첨부 이미지" />
+                  <button
+                    type="button"
+                    className="press-thumb-remove"
+                    onClick={() => removeExisting(path)}
+                    aria-label="이미지 제거"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
               {previews.map((src, index) => (
-                <div className="press-thumb" key={index}>
+                <div className="press-thumb" key={`new-${index}`}>
                   <img src={src} alt="첨부 이미지" />
                   <button
                     type="button"
                     className="press-thumb-remove"
-                    onClick={() => removeAt(index)}
+                    onClick={() => removeNewAt(index)}
                     aria-label="이미지 제거"
                   >
                     <X size={14} />
@@ -4511,7 +4555,7 @@ function PressWrite({
             </button>
             <button type="button" className="button primary" disabled={saving} onClick={submit}>
               {saving ? <Loader2 size={16} className="spin" /> : <Plus size={16} />}
-              등록하기
+              {isEdit ? "수정하기" : "등록하기"}
             </button>
           </div>
           {error && (
@@ -4529,11 +4573,13 @@ function PressWrite({
 function PressDetail({
   release,
   onBack,
+  onEdit,
   onDelete,
   onToggle,
 }: {
   release: PressRelease | undefined;
   onBack: () => void;
+  onEdit: () => void;
   onDelete: () => void;
   onToggle: (release: PressRelease, key: keyof PressCoverage) => void;
 }) {
@@ -4559,10 +4605,16 @@ function PressDetail({
             <ChevronLeft size={16} />
             목록
           </button>
-          <button className="button danger small" onClick={onDelete}>
-            <X size={16} />
-            삭제
-          </button>
+          <div className="press-detail-actions">
+            <button className="button secondary small" onClick={onEdit}>
+              <Settings size={16} />
+              수정
+            </button>
+            <button className="button danger small" onClick={onDelete}>
+              <X size={16} />
+              삭제
+            </button>
+          </div>
         </div>
         <h1 className="press-detail-title">{release.title}</h1>
         <div className="press-detail-meta">

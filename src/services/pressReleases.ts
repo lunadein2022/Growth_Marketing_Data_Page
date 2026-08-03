@@ -123,6 +123,50 @@ export async function createPressRelease(input: {
   return toRelease(data as PressRow);
 }
 
+export async function uploadPressImages(id: string, files: File[]): Promise<string[]> {
+  const supabase = getSupabaseClient();
+  const paths: string[] = [];
+  for (const [index, file] of files.entries()) {
+    const path = `${ORG_ID}/${id}/${Date.now()}-${index + 1}-${safeName(file.name)}`;
+    const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
+      contentType: file.type || "image/jpeg",
+      upsert: false,
+    });
+    if (error) throw new Error(error.message);
+    paths.push(path);
+  }
+  return paths;
+}
+
+export async function updatePressRelease(input: {
+  id: string;
+  title: string;
+  body: string;
+  images: string[];
+  removedImages?: string[];
+}): Promise<PressRelease> {
+  const supabase = getSupabaseClient();
+
+  if (input.removedImages?.length) {
+    // Best-effort cleanup of images the user removed.
+    await supabase.storage.from(BUCKET).remove(input.removedImages).catch(() => undefined);
+  }
+
+  const { data, error } = await supabase
+    .from("press_releases")
+    .update({
+      title: input.title,
+      body: input.body,
+      images: input.images,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", input.id)
+    .select(COLUMNS)
+    .single();
+  if (error) throw new Error(error.message);
+  return toRelease(data as PressRow);
+}
+
 export async function updatePressCoverage(id: string, coverage: PressCoverage): Promise<void> {
   const supabase = getSupabaseClient();
   const { error } = await supabase
