@@ -98,6 +98,7 @@ import {
 import type {
   AdContent,
   AiBriefing,
+  BriefingRequest,
   ChannelMetric,
   ChannelId,
   ChannelView,
@@ -332,6 +333,11 @@ function getBriefingPeriodRange(periodMode: PeriodMode) {
   };
 }
 
+function formatBriefingPeriodLabel(periodMode: PeriodMode) {
+  const range = getBriefingPeriodRange(periodMode);
+  return periodMode === "weekly" ? `${range.start} ~ ${range.end}` : `${range.start.slice(0, 7)}`;
+}
+
 function mergeBriefingHistory(incoming: AiBriefing[], current: AiBriefing[]) {
   const byKey = new Map<string, AiBriefing>();
   [...incoming, ...current].forEach((item) => {
@@ -340,6 +346,71 @@ function mergeBriefingHistory(incoming: AiBriefing[], current: AiBriefing[]) {
   });
 
   return Array.from(byKey.values()).slice(0, 60);
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function asRecordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.map(asRecord).filter((item) => Object.keys(item).length > 0) : [];
+}
+
+function asText(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function buildLocalBriefingFromContext(
+  request: BriefingRequest,
+  context: BriefingContext,
+  errorDetail?: string,
+): AiBriefing {
+  const figures = context.figures ?? {};
+  const channelFigure = asRecord(figures.channel);
+  const commandFigure = asRecord(figures.command);
+  const kpis = asRecordArray(channelFigure.kpis ?? commandFigure.kpis);
+  const topContent = asRecordArray(channelFigure.topContent);
+  const periodLabel = context.periodLabel ?? formatBriefingPeriodLabel(request.periodMode);
+  const target =
+    asText(channelFigure.name) ||
+    request.ad ||
+    request.campaign ||
+    (request.channel ? channelMeta[request.channel].label : "Brand Command Center");
+  const evidence = [
+    ...kpis.map((kpi) => {
+      const secondary = asText(kpi.secondary);
+      return `${asText(kpi.label)}: ${asText(kpi.value)}${secondary ? ` (${secondary})` : ""}`;
+    }),
+    ...topContent.map((item) => `${asText(item.title)}: ${asText(item.metric)}`),
+  ].filter(Boolean).slice(0, 4);
+  const primaryKpi = evidence[0] ?? "현재 화면의 집계 지표";
+  const dataWarnings = [
+    ...(errorDetail ? [`Claude 응답 형식 문제로 현재 화면 데이터 기반 요약으로 대체했습니다: ${errorDetail}`] : []),
+    ...(context.dataWarnings ?? []),
+  ].slice(0, 6);
+
+  return {
+    title: `${target} ${request.periodMode === "weekly" ? "주간" : "월간"} AI 보고서`,
+    generatedAt: formatImportTimestamp(),
+    periodLabel,
+    dataSources: (context.dataSources?.length ? context.dataSources : ["현재 화면 집계"]).slice(0, 8),
+    dataWarnings,
+    summary: `${target} 보고서는 현재 화면에 집계된 실제 지표를 기준으로 생성했습니다. 우선 확인할 기준값은 ${primaryKpi}입니다.`,
+    wins: evidence.length
+      ? evidence.slice(0, 3).map((item) => `${item} 기준으로 성과 확인이 가능합니다.`)
+      : ["현재 화면에 집계된 지표 기준으로 성과를 확인할 수 있습니다."],
+    risks: dataWarnings.length
+      ? dataWarnings.slice(0, 3)
+      : ["일부 지표는 API나 파일 업로드 범위에 따라 누락될 수 있으므로 데이터 출처를 함께 확인해야 합니다."],
+    actions: [
+      topContent[0]
+        ? `${asText(topContent[0].title)} 콘텐츠의 지표를 먼저 확인하고 재활용 또는 후속 게시 여부를 판단합니다.`
+        : "가장 중요한 KPI를 기준으로 상승/하락 원인을 먼저 확인합니다.",
+      "누락 또는 일부 데이터로 표시된 항목은 Data Center에서 연결 상태를 먼저 확인합니다.",
+      "성과가 좋은 콘텐츠는 캠페인 또는 광고 원본 콘텐츠로 연결해 후속 성과를 기록합니다.",
+    ],
+    evidence: evidence.length ? evidence : ["현재 화면 집계 데이터"],
+  };
 }
 
 function parseContentDate(value: string) {
@@ -1090,6 +1161,7 @@ function App() {
     }
 
     return {
+      periodLabel: formatBriefingPeriodLabel(periodMode),
       dataSources: [...sources],
       dataWarnings: getBriefingWarnings(channels, dataCenter ?? undefined, targetChannel),
       figures,
@@ -1107,24 +1179,22 @@ function App() {
     setBriefing(null);
 
     const request = { surface, periodMode, channel, campaign, ad };
+    const context = buildBriefingContext(channel);
 
     try {
       let nextBriefing: AiBriefing;
 
       if (canUseEdgeBriefings() && authUser) {
         try {
-          nextBriefing = await generateBriefingViaEdge(request, buildBriefingContext(channel));
+          nextBriefing = await generateBriefingViaEdge(request, context);
         } catch (error) {
-          // Fall back to the local template so the panel always renders something.
+          // Keep the panel useful even when Claude returns an invalid shape.
           const detail = error instanceof Error ? error.message : "알 수 없는 오류";
-          const fallback = await provider.generateBriefing(request);
-          nextBriefing = {
-            ...fallback,
-            dataWarnings: [`실제 AI 호출 실패로 목업 보고서로 대체했습니다: ${detail}`, ...fallback.dataWarnings],
-          };
+          const fallback = buildLocalBriefingFromContext(request, context, detail);
+          nextBriefing = fallback;
         }
       } else {
-        nextBriefing = await provider.generateBriefing(request);
+        nextBriefing = buildLocalBriefingFromContext(request, context);
       }
 
       setBriefing(nextBriefing);

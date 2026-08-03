@@ -29,15 +29,43 @@ type BriefingContext = {
   [key: string]: unknown;
 };
 
+type ModelContentBlock = {
+  type: string;
+  name?: string;
+  input?: unknown;
+  text?: string;
+};
+
 const SYSTEM_PROMPT = [
-  "당신은 DummDumm Inc. 마케팅 대시보드의 AI 브리핑 분석가입니다.",
-  "반드시 제공된 context 안의 수치와 문장만 근거로 사용합니다.",
-  "없는 수치, 비율, 플랫폼 성과를 추측하거나 만들어내지 않습니다.",
-  "마케터가 바로 판단할 수 있게 짧고 실행 중심으로 씁니다.",
-  "출력은 코드블록 없이 JSON 객체 하나만 반환합니다.",
-  "필수 키: title, periodLabel, summary, dataSources, dataWarnings, wins, risks, actions, evidence",
-  "wins/risk/actions/evidence 배열은 각각 최대 4개, 각 항목은 한 문장으로 제한합니다.",
+  "You are an AI briefing analyst for DummDumm Inc.'s marketing dashboard.",
+  "Write the final briefing in Korean.",
+  "Use only the numbers and facts included in the supplied context.",
+  "Do not invent metrics, dates, rankings, campaigns, channels, or performance deltas.",
+  "If a metric is missing, mention it as a data warning instead of guessing.",
+  "Keep the answer concise and useful for a one-person marketing operator.",
+  "Return the briefing by calling the return_briefing tool.",
 ].join("\n");
+
+const BRIEFING_TOOL = {
+  name: "return_briefing",
+  description: "Return a concise Korean marketing briefing based only on the supplied dashboard context.",
+  input_schema: {
+    type: "object",
+    properties: {
+      title: { type: "string" },
+      periodLabel: { type: "string" },
+      summary: { type: "string" },
+      dataSources: { type: "array", items: { type: "string" }, maxItems: 8 },
+      dataWarnings: { type: "array", items: { type: "string" }, maxItems: 6 },
+      wins: { type: "array", items: { type: "string" }, maxItems: 4 },
+      risks: { type: "array", items: { type: "string" }, maxItems: 4 },
+      actions: { type: "array", items: { type: "string" }, maxItems: 4 },
+      evidence: { type: "array", items: { type: "string" }, maxItems: 4 },
+    },
+    required: ["title", "periodLabel", "summary", "dataSources", "dataWarnings", "wins", "risks", "actions", "evidence"],
+    additionalProperties: false,
+  },
+} as const;
 
 function labelPeriod(mode: BriefingRequest["periodMode"]) {
   return mode === "weekly" ? "주간" : "월간";
@@ -66,11 +94,11 @@ function buildUserPrompt(request: BriefingRequest, context: BriefingContext): st
       : compactContext;
 
   return [
-    `대상: ${labelTarget(request)}`,
-    `보고 주기: ${labelPeriod(request.periodMode)} (surface=${request.surface})`,
-    "아래 context만 사용해서 한국어 브리핑 JSON을 생성하세요.",
-    "summary는 2문장 이내, actions는 담당자가 오늘 바로 할 일 중심으로 작성하세요.",
-    "dataWarnings에는 기존 경고와 추가로 확인해야 할 누락 데이터를 넣으세요.",
+    `Target: ${labelTarget(request)}`,
+    `Report cadence: ${labelPeriod(request.periodMode)} (surface=${request.surface})`,
+    "Use only this context. Write a Korean briefing for a marketer.",
+    "Summary must be at most 2 sentences. Actions must be concrete next steps.",
+    "Include existing data warnings and add missing-data warnings when relevant.",
     `context: ${contextText}`,
   ].join("\n");
 }
@@ -87,6 +115,20 @@ function extractJson(text: string): unknown {
   }
 
   return JSON.parse(cleaned);
+}
+
+function parseModelBriefing(content: ModelContentBlock[]): Record<string, unknown> {
+  const toolBlock = content.find((block) => block.type === "tool_use" && block.name === "return_briefing");
+  if (toolBlock?.input && typeof toolBlock.input === "object") {
+    return toolBlock.input as Record<string, unknown>;
+  }
+
+  const textBlock = content.find((block) => block.type === "text" && typeof block.text === "string");
+  if (!textBlock?.text) {
+    throw new Error("No text or tool content returned from the model.");
+  }
+
+  return extractJson(textBlock.text) as Record<string, unknown>;
 }
 
 function toString(value: unknown, fallback = "") {
@@ -137,6 +179,8 @@ Deno.serve(async (req) => {
       model: MODEL,
       max_tokens: MAX_TOKENS,
       system: SYSTEM_PROMPT,
+      tools: [BRIEFING_TOOL],
+      tool_choice: { type: "tool", name: "return_briefing" },
       messages: [{ role: "user", content: buildUserPrompt(request, context) }],
     });
 
@@ -144,18 +188,12 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: "The request was declined by safety filters." }, 422);
     }
 
-    const textBlock = message.content.find((block: { type: string }) => block.type === "text") as
-      | { type: "text"; text: string }
-      | undefined;
-    if (!textBlock) {
-      return jsonResponse({ error: "No text content returned from the model." }, 502);
-    }
-
     let parsed: Record<string, unknown>;
     try {
-      parsed = extractJson(textBlock.text) as Record<string, unknown>;
-    } catch {
-      return jsonResponse({ error: "Model response could not be parsed as JSON." }, 502);
+      parsed = parseModelBriefing(message.content as ModelContentBlock[]);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown parser error";
+      return jsonResponse({ error: `Model response could not be parsed: ${detail}` }, 502);
     }
 
     const briefing = {
@@ -164,7 +202,7 @@ Deno.serve(async (req) => {
       periodLabel: toString(parsed.periodLabel, context.periodLabel ?? labelPeriod(request.periodMode)),
       dataSources: toStringArray(parsed.dataSources, 8),
       dataWarnings: toStringArray(parsed.dataWarnings, 6),
-      summary: toString(parsed.summary, "제공된 데이터 기준으로 생성할 수 있는 요약이 부족합니다."),
+      summary: toString(parsed.summary, "제공된 데이터만으로는 충분한 요약을 생성하지 못했습니다."),
       wins: toStringArray(parsed.wins, 4),
       risks: toStringArray(parsed.risks, 4),
       actions: toStringArray(parsed.actions, 4),
