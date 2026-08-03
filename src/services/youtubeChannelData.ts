@@ -131,6 +131,7 @@ function buildContentItem(post: PublishedPostRow, snapshot?: MetricSnapshotRow):
     id: post.id,
     title: post.title,
     channel: "youtube",
+    accountKey: "main",
     type: format,
     status: hasPeriodMetrics ? "기간 성과 연결" : "영상 메타데이터 저장",
     campaign: hasPeriodMetrics ? "YouTube Analytics" : "YouTube Data API",

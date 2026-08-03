@@ -44,6 +44,7 @@ export interface ChannelView {
   source: string;
   tabs: string[];
   kpis: ChannelMetric[];
+  accountKpis?: Partial<Record<string, ChannelMetric[]>>;
   trend: TrendPoint[];
   trendSeries?: Partial<Record<string, TrendPoint[]>>;
   topContent: ContentItem[];
@@ -54,6 +55,7 @@ export interface ContentItem {
   id: string;
   title: string;
   channel: Exclude<ChannelId, "all">;
+  accountKey?: string;
   type: string;
   status: string;
   campaignId?: string;

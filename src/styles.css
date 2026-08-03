@@ -1748,6 +1748,12 @@ h3 {
   color: #006a53 !important;
 }
 
+.sync-note.partial {
+  border: 1px solid #f5d58a;
+  background: #fff8e6;
+  color: #8a5a00 !important;
+}
+
 .sync-note.error {
   border: 1px solid #fecaca;
   background: #fff7f7;

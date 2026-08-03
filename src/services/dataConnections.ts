@@ -44,7 +44,7 @@ export const API_CONNECTION_REQUIREMENTS: ApiConnectionRequirement[] = [
     metrics: ["팔로워", "도달", "조회", "저장", "공유"],
     scopes: ["instagram_basic", "instagram_manage_insights", "pages_show_list"],
     syncTargets: ["channel_accounts", "published_posts", "metric_snapshots", "metric_time_series"],
-    requiredSecrets: ["META_APP_ID", "META_APP_SECRET"],
+    requiredSecrets: ["META_ACCESS_TOKEN", "INSTAGRAM_ACCOUNT_COMPANY_ID", "INSTAGRAM_ACCOUNT_DUMMDUMM_LOG_ID"],
   },
   {
     id: "website",

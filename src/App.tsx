@@ -67,12 +67,24 @@ import {
   type YoutubeSyncState,
 } from "./services/youtubeSync";
 import {
+  canSyncInstagramAnalytics,
+  syncInstagramAnalytics,
+  type InstagramSyncState,
+} from "./services/instagramSync";
+import {
   applyYoutubeChannelPatch,
   applyYoutubeContentToContentLab,
   buildYoutubeKpisFromContent,
   canLoadYoutubeChannelData,
   loadYoutubeChannelPatch,
 } from "./services/youtubeChannelData";
+import {
+  applyInstagramChannelPatch,
+  applyInstagramContentToContentLab,
+  buildInstagramKpisFromContent,
+  canLoadInstagramChannelData,
+  loadInstagramChannelPatch,
+} from "./services/instagramChannelData";
 import {
   canComparePeriods,
   computePeriodComparison,
@@ -980,6 +992,8 @@ function App() {
   const [importPersistence, setImportPersistence] = useState<SupabaseImportPersistence | null>(null);
   const [youtubeSyncing, setYoutubeSyncing] = useState(false);
   const [youtubeSyncResult, setYoutubeSyncResult] = useState<YoutubeSyncState | null>(null);
+  const [instagramSyncing, setInstagramSyncing] = useState(false);
+  const [instagramSyncResult, setInstagramSyncResult] = useState<InstagramSyncState | null>(null);
   const [authUser, setAuthUser] = useState<DashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
@@ -987,6 +1001,7 @@ function App() {
   const naverMonthlyReportRef = useRef<NaverMonthlyReport | null>(null);
   const naverMonthlyReportsRef = useRef<NaverMonthlyReport[]>([]);
   const youtubeChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
+  const instagramChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const authConfigured = hasAuthConfig();
   const channelDataSignature = useMemo(
     () => channels.map((channel) => `${channel.id}:${channel.updatedAt}:${channel.source}`).join("|"),
@@ -1040,6 +1055,27 @@ function App() {
       })
       .catch((error) => {
         console.warn("Saved YouTube channel data could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
+
+  useEffect(() => {
+    if (!authUser || !canLoadInstagramChannelData() || channels.length === 0) return;
+
+    let mounted = true;
+
+    loadInstagramChannelPatch(periodMode)
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        instagramChannelPatchRef.current = patch;
+        setChannels((current) => applyInstagramChannelPatch(current, patch));
+        setContentLab((current) => (current ? applyInstagramContentToContentLab(current, patch) : current));
+      })
+      .catch((error) => {
+        console.warn("Saved Instagram channel data could not be loaded.", error);
       });
 
     return () => {
@@ -1220,7 +1256,10 @@ function App() {
   };
 
   const replaceContentLab = (nextContentLab: ContentLabSnapshot) => {
-    const mergedContentLab = applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current);
+    const mergedContentLab = applyInstagramContentToContentLab(
+      applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current),
+      instagramChannelPatchRef.current,
+    );
     setContentLab(mergedContentLab);
     return mergedContentLab;
   };
@@ -1379,6 +1418,82 @@ function App() {
     }
   };
 
+  const handleSyncInstagram = async () => {
+    if (instagramSyncing) return;
+
+    if (!canSyncInstagramAnalytics()) {
+      setInstagramSyncResult({ status: "error", message: "Supabase config is missing. Instagram sync cannot run." });
+      return;
+    }
+
+    if (!authUser) {
+      setInstagramSyncResult({ status: "error", message: "Google login is required to run Instagram sync." });
+      return;
+    }
+
+    const range = getBriefingPeriodRange(periodMode);
+    setInstagramSyncing(true);
+    setInstagramSyncResult(null);
+
+    try {
+      const result = await syncInstagramAnalytics({
+        periodMode,
+        startDate: range.start,
+        endDate: range.end,
+        maxMedia: 200,
+        includeMediaBackfill: true,
+      });
+      setInstagramSyncResult(result);
+      void loadInstagramChannelPatch(periodMode)
+        .then((patch) => {
+          if (!patch) return;
+          instagramChannelPatchRef.current = patch;
+          setChannels((current) => applyInstagramChannelPatch(current, patch));
+          setContentLab((current) => (current ? applyInstagramContentToContentLab(current, patch) : current));
+        })
+        .catch((error) => {
+          console.warn("Instagram channel data could not be refreshed after sync.", error);
+        });
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "meta-instagram"
+                  ? {
+                      ...source,
+                      status: result.status === "complete" ? "complete" : "partial",
+                      lastSync: formatImportTimestamp(),
+                      detail: `Instagram ${result.periodStart}~${result.periodEnd} · 계정 ${result.accounts.length}개 · 게시물 ${result.accounts.reduce(
+                        (total, account) => total + account.mediaSynced,
+                        0,
+                      )}개 저장`,
+                    }
+                  : source,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setInstagramSyncResult({
+        status: "error",
+        message: error instanceof Error ? error.message : "Instagram Graph API sync failed.",
+      });
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "meta-instagram" ? { ...source, status: "error", lastSync: formatImportTimestamp() } : source,
+              ),
+            }
+          : current,
+      );
+    } finally {
+      setInstagramSyncing(false);
+    }
+  };
+
   const ready = snapshot && contentLab && dataCenter && channels.length > 0;
 
   return (
@@ -1502,10 +1617,13 @@ function App() {
                 authBusy={authBusy}
                 youtubeSyncing={youtubeSyncing}
                 youtubeSyncResult={youtubeSyncResult}
+                instagramSyncing={instagramSyncing}
+                instagramSyncResult={instagramSyncResult}
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
                 onImportFiles={handleImportFiles}
                 onSyncYouTube={handleSyncYouTube}
+                onSyncInstagram={handleSyncInstagram}
               />
             )}
 
@@ -1958,6 +2076,22 @@ function contentMatchesType(item: ContentItem, types: string[]) {
   return types.some((type) => source.includes(type.toLowerCase()));
 }
 
+function getInstagramAccountKeyFromFilter(account: string) {
+  if (account.includes("둠둠")) return "dummdumm-log";
+  if (account.includes("본계")) return "company";
+  return undefined;
+}
+
+function getInstagramFormatKeyFromFilter(format: string) {
+  if (format.includes("릴")) return "reels";
+  if (format.includes("캐")) return "carousel";
+  return undefined;
+}
+
+function isRealInstagramContent(item: ContentItem) {
+  return item.channel === "instagram" && Boolean(item.performance);
+}
+
 function decorateContentVariant(
   items: ContentItem[],
   fallback: ContentItem[],
@@ -2040,6 +2174,25 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
       }[account];
       const followerGain = Math.max(1, Math.round(followerBase.gain * formatScale));
       const label = [account, format].filter((value) => value !== "전체").join(" · ") || "전체";
+
+      const hasRealInstagramDataset = channel.topContent.some(isRealInstagramContent);
+
+      if (hasRealInstagramDataset) {
+        const accountKey = getInstagramAccountKeyFromFilter(account);
+        const formatKey = getInstagramFormatKeyFromFilter(format);
+        let realContent = channel.topContent.filter(isRealInstagramContent);
+
+        if (accountKey) realContent = realContent.filter((item) => item.accountKey === accountKey);
+        if (formatKey) realContent = realContent.filter((item) => contentMatchesType(item, [formatKey]));
+
+        return {
+          ...channel,
+          kpis: buildInstagramKpisFromContent(channel, realContent, accountKey),
+          trend: channel.trend,
+          topContent: realContent,
+          dataNote: `${label} 기준입니다. Supabase에 저장된 Instagram Graph API 게시물 성과를 계정/포맷별로 분리해 보여줍니다.`,
+        };
+      }
 
       let content = channel.topContent;
       if (account !== "전체") {
@@ -4451,10 +4604,13 @@ function DataCenter({
   authBusy,
   youtubeSyncing,
   youtubeSyncResult,
+  instagramSyncing,
+  instagramSyncResult,
   onSignIn,
   onSignOut,
   onImportFiles,
   onSyncYouTube,
+  onSyncInstagram,
 }: {
   data: DataCenterSnapshot;
   importing: boolean;
@@ -4465,10 +4621,13 @@ function DataCenter({
   authBusy: boolean;
   youtubeSyncing: boolean;
   youtubeSyncResult: YoutubeSyncState | null;
+  instagramSyncing: boolean;
+  instagramSyncResult: InstagramSyncState | null;
   onSignIn: () => void;
   onSignOut: () => void;
   onImportFiles: (files: File[]) => void;
   onSyncYouTube: () => void;
+  onSyncInstagram: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourcesPagination = usePaginatedItems(data.sources);
@@ -4580,6 +4739,25 @@ function DataCenter({
                 {youtubeSyncResult.status === "complete"
                   ? `${youtubeSyncResult.videosSynced}개 영상 저장 · 기간 성과 ${youtubeSyncResult.videosWithPeriodMetrics ?? 0}개 · ${youtubeSyncResult.dailyPoints}일 지표`
                   : youtubeSyncResult.message}
+              </small>
+            )}
+            {source.id === "meta-instagram" && (
+              <div className="source-action-row">
+                <button className="button secondary small" disabled={instagramSyncing || !authUser} onClick={onSyncInstagram}>
+                  {instagramSyncing ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                  Instagram 동기화
+                </button>
+                {!authUser && <span>Google 로그인 필요</span>}
+              </div>
+            )}
+            {source.id === "meta-instagram" && instagramSyncResult && (
+              <small className={`sync-note ${instagramSyncResult.status}`}>
+                {instagramSyncResult.status === "error"
+                  ? instagramSyncResult.message
+                  : `${instagramSyncResult.accounts.length}개 계정 · ${instagramSyncResult.accounts.reduce(
+                      (total, account) => total + account.mediaSynced,
+                      0,
+                    )}개 게시물 저장 · ${instagramSyncResult.rowsWritten}행 처리`}
               </small>
             )}
           </div>
@@ -5949,7 +6127,11 @@ function getPublishTime(item: ContentItem) {
 
 function getContentTypeTags(item: ContentItem): ContentTypeTag[] {
   const source = `${item.title} ${item.type} ${item.status}`.toLowerCase();
-  const hasDummLog = source.includes("둠둠로그") || source.includes("dummlog") || source.includes("dumm log");
+  const hasDummLog =
+    item.accountKey === "dummdumm-log" ||
+    source.includes("둠둠로그") ||
+    source.includes("dummlog") ||
+    source.includes("dumm log");
 
   switch (item.channel) {
     case "youtube":
