@@ -67,6 +67,25 @@ export interface ContentItem {
   performanceSource?: string;
   externalUrl?: string;
   decisionLogs?: string[];
+  performance?: Partial<{
+    views: number;
+    watchTimeMinutes: number;
+    reach: number;
+    impressions: number;
+    avgWatchSeconds: number;
+    likes: number;
+    comments: number;
+    shares: number;
+    saves: number;
+    clicks: number;
+    followers: number;
+    visitors: number;
+    visits: number;
+    trafficInflow: number;
+    revisitRate: number;
+    searchClicks: number;
+    inquiries: number;
+  }>;
 }
 
 export interface PublishingItem {

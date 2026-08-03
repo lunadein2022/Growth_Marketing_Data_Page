@@ -67,6 +67,12 @@ import {
   type YoutubeSyncState,
 } from "./services/youtubeSync";
 import {
+  applyYoutubeChannelPatch,
+  buildYoutubeKpisFromContent,
+  canLoadYoutubeChannelData,
+  loadYoutubeChannelPatch,
+} from "./services/youtubeChannelData";
+import {
   canComparePeriods,
   computePeriodComparison,
   type DateRange,
@@ -909,6 +915,10 @@ function App() {
   const naverMonthlyReportRef = useRef<NaverMonthlyReport | null>(null);
   const naverMonthlyReportsRef = useRef<NaverMonthlyReport[]>([]);
   const authConfigured = hasAuthConfig();
+  const channelDataSignature = useMemo(
+    () => channels.map((channel) => `${channel.id}:${channel.updatedAt}:${channel.source}`).join("|"),
+    [channels],
+  );
 
   useEffect(() => {
     naverMonthlyReportRef.current = naverMonthlyReport;
@@ -942,6 +952,25 @@ function App() {
   }, [periodMode]);
 
   useEffect(() => subscribeToAuthUser(setAuthUser), []);
+
+  useEffect(() => {
+    if (!authUser || !canLoadYoutubeChannelData() || channels.length === 0) return;
+
+    let mounted = true;
+
+    loadYoutubeChannelPatch(periodMode)
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        setChannels((current) => applyYoutubeChannelPatch(current, patch));
+      })
+      .catch((error) => {
+        console.warn("Saved YouTube channel data could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
 
   useEffect(() => {
     if (!authUser || !canLoadDataCenterSyncStatus()) return;
@@ -1217,6 +1246,13 @@ function App() {
         includeUploadBackfill: true,
       });
       setYoutubeSyncResult(result);
+      void loadYoutubeChannelPatch(periodMode)
+        .then((patch) => {
+          if (patch) setChannels((current) => applyYoutubeChannelPatch(current, patch));
+        })
+        .catch((error) => {
+          console.warn("YouTube channel data could not be refreshed after sync.", error);
+        });
       setDataCenter((current) =>
         current
           ? {
@@ -1860,18 +1896,23 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
           : format === "롱폼"
             ? channel.topContent.filter((item) => contentMatchesType(item, ["long"]))
             : channel.topContent;
+      const hasRealYoutubeDataset = channel.topContent.some((item) => item.performance);
+      const youtubeFilteredContent = (label: string) =>
+        decorateContentVariant(content, hasRealYoutubeDataset ? [] : channel.topContent, label, "조회");
 
       if (format === "쇼츠") {
         return {
           ...channel,
-          kpis: [
-            metric("구독자", "18,320명", "+9%", "complete", "+124명"),
-            metric("조회수", "15,880", "+36%"),
-            metric("시청시간", "410h", "+18%"),
-            metric("평균 시청", "0:23", "+6%"),
-          ],
+          kpis: hasRealYoutubeDataset
+            ? buildYoutubeKpisFromContent(channel, content)
+            : [
+                metric("구독자", "18,320명", "+9%", "complete", "+124명"),
+                metric("조회수", "15,880", "+36%"),
+                metric("시청시간", "410h", "+18%"),
+                metric("평균 시청", "0:23", "+6%"),
+              ],
           trend: scaleTrend(channel.trend, 1.16, 4),
-          topContent: decorateContentVariant(content, channel.topContent, "쇼츠", "조회"),
+          topContent: youtubeFilteredContent("쇼츠"),
           dataNote: "YouTube Shorts 기준입니다. 조회와 구독자 유입은 빠르게 반영하고 시청시간은 별도 기여로 봅니다.",
         };
       }
@@ -1879,14 +1920,16 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
       if (format === "롱폼") {
         return {
           ...channel,
-          kpis: [
-            metric("구독자", "18,320명", "+7%", "complete", "+94명"),
-            metric("조회수", "7,220", "+18%"),
-            metric("시청시간", "838h", "+9%"),
-            metric("평균 시청", "3:42", "+11%"),
-          ],
+          kpis: hasRealYoutubeDataset
+            ? buildYoutubeKpisFromContent(channel, content)
+            : [
+                metric("구독자", "18,320명", "+7%", "complete", "+94명"),
+                metric("조회수", "7,220", "+18%"),
+                metric("시청시간", "838h", "+9%"),
+                metric("평균 시청", "3:42", "+11%"),
+              ],
           trend: scaleTrend(channel.trend, 0.78, 2),
-          topContent: decorateContentVariant(content, channel.topContent, "롱폼", "조회"),
+          topContent: youtubeFilteredContent("롱폼"),
           dataNote: "YouTube 롱폼 기준입니다. 평균 시청과 시청시간을 Shorts와 분리해 전문성 콘텐츠 기여를 확인합니다.",
         };
       }
@@ -5723,8 +5766,9 @@ function formatCount(value: number) {
 
 function formatDuration(seconds: number) {
   if (seconds <= 0) return "-";
-  const minutes = Math.floor(seconds / 60);
-  const remaining = seconds % 60;
+  const rounded = Math.round(seconds);
+  const minutes = Math.floor(rounded / 60);
+  const remaining = rounded % 60;
   return `${minutes}:${String(remaining).padStart(2, "0")}`;
 }
 
@@ -5910,26 +5954,29 @@ function getContentPerformanceRow(item: ContentItem): ContentPerformanceRow {
     followers = Math.max(0, Math.round(views * (0.0015 + (seed % 4) / 5000)));
   }
 
+  const actual = item.performance ?? {};
+  const resolvedAvgWatchSeconds = actual.avgWatchSeconds ?? avgWatchSeconds;
+
   return {
     item,
     publishTime: getPublishTime(item),
-    views,
-    reach,
-    impressions,
-    avgWatchSeconds,
-    avgWatchLabel: avgWatchSeconds > 0 ? formatDuration(avgWatchSeconds) : "-",
-    likes,
-    comments,
-    shares,
-    saves,
-    clicks,
-    followers,
-    visitors,
-    visits,
-    trafficInflow,
-    revisitRate,
-    searchClicks,
-    inquiries,
+    views: actual.views ?? views,
+    reach: actual.reach ?? reach,
+    impressions: actual.impressions ?? impressions,
+    avgWatchSeconds: resolvedAvgWatchSeconds,
+    avgWatchLabel: resolvedAvgWatchSeconds > 0 ? formatDuration(resolvedAvgWatchSeconds) : "-",
+    likes: actual.likes ?? likes,
+    comments: actual.comments ?? comments,
+    shares: actual.shares ?? shares,
+    saves: actual.saves ?? saves,
+    clicks: actual.clicks ?? clicks,
+    followers: actual.followers ?? followers,
+    visitors: actual.visitors ?? visitors,
+    visits: actual.visits ?? visits,
+    trafficInflow: actual.trafficInflow ?? trafficInflow,
+    revisitRate: actual.revisitRate ?? revisitRate,
+    searchClicks: actual.searchClicks ?? searchClicks,
+    inquiries: actual.inquiries ?? inquiries,
   };
 }
 
