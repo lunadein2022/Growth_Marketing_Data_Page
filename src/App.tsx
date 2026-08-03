@@ -116,6 +116,11 @@ type ReuseRecommendation = {
   reason: string;
 };
 type FileImportChannel = "linkedin" | "tiktok" | "naver";
+const FILE_IMPORT_CHANNEL_LABELS: Record<FileImportChannel, string> = {
+  linkedin: "LinkedIn",
+  tiktok: "TikTok",
+  naver: "Naver Blog",
+};
 type ParsedFileImportItem = {
   id: string;
   sourceFileName: string;
@@ -347,14 +352,12 @@ function cleanImportedTitle(fileName: string) {
     .trim();
 }
 
-function inferImportChannel(fileName: string, index: number): FileImportChannel {
+function inferImportChannel(fileName: string): FileImportChannel | null {
   const source = fileName.toLowerCase();
-  if (/linkedin|링크드인|b2b|카드뉴스|card/.test(source)) return "linkedin";
-  if (/tiktok|틱톡|숏폼|short|shorts/.test(source)) return "tiktok";
+  if (/linkedin|링크드인/.test(source)) return "linkedin";
+  if (/tiktok|틱톡/.test(source)) return "tiktok";
   if (/naver|네이버|blog|블로그|원고|후기|추천|조회수|유입|순방문|방문|재방문|평균\s*사용|성연령|성\/연령|국가|공감|댓글|순위/.test(source)) return "naver";
-
-  const fallback: FileImportChannel[] = ["linkedin", "tiktok", "naver"];
-  return fallback[index % fallback.length];
+  return null;
 }
 
 function getParsedImportMetric(channel: FileImportChannel, seed: number) {
@@ -370,8 +373,10 @@ function getParsedImportMetric(channel: FileImportChannel, seed: number) {
 }
 
 function buildDataFileImportResult(files: File[]): DataFileImportResult {
-  const items = files.map((file, index): ParsedFileImportItem => {
-    const channel = inferImportChannel(file.name, index);
+  const items = files.flatMap((file, index): ParsedFileImportItem[] => {
+    const channel = inferImportChannel(file.name);
+    if (!channel) return [];
+
     const metric = getParsedImportMetric(channel, Math.max(1, Math.round(file.size / 1024) + index));
     const type: Record<FileImportChannel, string> = {
       linkedin: "Card",
@@ -379,14 +384,14 @@ function buildDataFileImportResult(files: File[]): DataFileImportResult {
       naver: "Blog",
     };
 
-    return {
+    return [{
       id: `import-${Date.now()}-${index}`,
       sourceFileName: file.name,
       channel,
       title: cleanImportedTitle(file.name) || `${channelMeta[channel].label} 업로드 콘텐츠`,
       type: type[channel],
       ...metric,
-    };
+    }];
   });
 
   return {
@@ -724,6 +729,7 @@ function getReuseRecommendations(contentLab: ContentLabSnapshot): ReuseRecommend
 
 function getBriefingWarnings(channels: ChannelView[], dataCenter?: DataCenterSnapshot, targetChannel?: Exclude<ChannelId, "all">) {
   const scopedChannels = targetChannel ? channels.filter((channel) => channel.id === targetChannel) : channels;
+  const targetLabel = targetChannel ? channelMeta[targetChannel].label : "";
   const metricWarnings = scopedChannels.flatMap((channel) =>
     channel.kpis
       .filter((kpi) => kpi.status === "partial" || kpi.status === "unavailable" || kpi.value === "N/A")
@@ -732,6 +738,12 @@ function getBriefingWarnings(channels: ChannelView[], dataCenter?: DataCenterSna
   const sourceWarnings =
     dataCenter?.issues
       .filter((issue) => issue.severity !== "info")
+      .filter((issue) => {
+        if (!targetChannel) return true;
+        const source = `${issue.title} ${issue.detail}`.toLowerCase();
+        const label = targetLabel.toLowerCase();
+        return source.includes(targetChannel) || source.includes(label);
+      })
       .map((issue) => `${issue.title}: ${issue.detail}`) ?? [];
 
   return [...metricWarnings, ...sourceWarnings].slice(0, 4);
@@ -4143,26 +4155,6 @@ function AdContentEditor({
   );
 }
 
-function getDataIssueImpact(issue: DataCenterSnapshot["issues"][number]) {
-  const source = `${issue.title} ${issue.detail}`;
-  if (/TikTok|틱톡/.test(source)) return "Channels · TikTok";
-  if (/LinkedIn|링크드인/.test(source)) return "Channels · LinkedIn";
-  if (/Naver|네이버|Blog|블로그/.test(source)) return "Channels · Naver Blog";
-  if (/월간|기간/.test(source)) return "전체 화면 · 기간 기준";
-  if (/중복|매핑|컬럼|열/.test(source)) return "Data Center · 열 매핑";
-  return "AI 브리핑 · KPI 카드";
-}
-
-function getDataIssueAction(issue: DataCenterSnapshot["issues"][number]) {
-  const source = `${issue.title} ${issue.detail}`;
-  if (issue.severity === "info") return "집계 기준만 확인";
-  if (/평균 시청|평균시청/.test(source)) return "다음 업로드 파일에 평균 시청 컬럼 포함";
-  if (/참여율|정의/.test(source)) return "원본 파일 정의와 시스템 지표명 맞추기";
-  if (/중복/.test(source)) return "같은 기간 파일 중복 여부 확인";
-  if (/미등록|누락/.test(source)) return "누락 컬럼 업로드 또는 API 권한 확인";
-  return "원본 파일과 매핑 규칙 점검";
-}
-
 function DataCenter({
   data,
   importing,
@@ -4192,6 +4184,7 @@ function DataCenter({
   const mappingPagination = usePaginatedItems(data.mappingRows);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
 
   const ensureUploadReady = () => {
     if (!authConfigured) {
@@ -4217,12 +4210,27 @@ function DataCenter({
     );
 
     if (!acceptedFiles.length) {
+      setImportNotice(null);
       setImportError("CSV, TSV, XLS, XLSX 파일만 업로드할 수 있습니다.");
       return;
     }
 
+    const unsupportedChannelFiles = acceptedFiles.filter((file) => !inferImportChannel(file.name));
+    const importableFiles = acceptedFiles.filter((file) => inferImportChannel(file.name));
+
+    if (!importableFiles.length) {
+      setImportNotice(null);
+      setImportError("파일명에서 LinkedIn, TikTok, Naver Blog 대상 파일을 찾지 못했습니다. API 채널 파일은 업로드하지 않습니다.");
+      return;
+    }
+
     setImportError(null);
-    onImportFiles(acceptedFiles);
+    setImportNotice(
+      unsupportedChannelFiles.length
+        ? `${unsupportedChannelFiles.length}개 파일은 파일 업로드 대상 채널이 아니어서 제외했습니다.`
+        : null,
+    );
+    onImportFiles(importableFiles);
   };
 
   const openFilePicker = () => {
@@ -4242,18 +4250,28 @@ function DataCenter({
         <div>
           <span className="eyebrow">Data Center</span>
           <h1>데이터 연결 상태</h1>
-          <p>API, 파일 업로드, 수기 데이터의 마지막 갱신과 데이터 상태를 확인합니다.</p>
+          <p>YouTube, Instagram, Website는 API로 연결하고 LinkedIn, Naver Blog, TikTok은 파일 업로드로 적재합니다.</p>
         </div>
       </section>
 
       <section className="source-grid data-source-grid">
         {sourcesPagination.pagedItems.map((source) => (
-          <div className="source-tile" key={source.id}>
+          <div className={`source-tile source-tile-${source.connectionGroup ?? source.kind}`} key={source.id}>
             <div className="tile-head">
               <strong>{source.label}</strong>
               <StatusPill status={source.status} />
             </div>
-            <span className="source-kind">{source.kind.toUpperCase()}</span>
+            <div className="source-meta-row">
+              <span className="source-kind">{(source.connectionGroup ?? source.kind).toUpperCase()}</span>
+              {source.cadence && <em>{source.cadence}</em>}
+            </div>
+            {source.channels?.length ? (
+              <div className="source-channel-list">
+                {source.channels.map((channel) => (
+                  <span key={channel}>{channel}</span>
+                ))}
+              </div>
+            ) : null}
             <p>{source.detail}</p>
             <small>{source.lastSync}</small>
           </div>
@@ -4299,11 +4317,16 @@ function DataCenter({
             </span>
             <div>
               <strong>파일 가져오기</strong>
-              <p>LinkedIn · TikTok · Naver Blog</p>
+              <p>LinkedIn · Naver Blog · TikTok 전용</p>
             </div>
           </div>
           <span className="source-kind">CSV / TSV / XLS / XLSX</span>
-          <p>파일을 넣으면 데이터 소스로 저장합니다. 콘텐츠 리스트에는 게시물 단위로 추출된 행만 추가됩니다.</p>
+          <p>YouTube, Instagram, Website는 API 연결형이라 파일 업로드 대상이 아닙니다.</p>
+          <div className="source-channel-list">
+            {(Object.keys(FILE_IMPORT_CHANNEL_LABELS) as FileImportChannel[]).map((channel) => (
+              <span key={channel}>{FILE_IMPORT_CHANNEL_LABELS[channel]}</span>
+            ))}
+          </div>
           <div className={authUser ? "supabase-import-auth connected" : "supabase-import-auth"}>
             <span>{authUser ? `${authUser.email ?? "로그인 사용자"} 연결됨` : "저장하려면 Google 로그인 필요"}</span>
             {authUser ? (
@@ -4367,6 +4390,7 @@ function DataCenter({
           ) : (
             <small>월간 리포트 파일은 콘텐츠 행으로 넣지 않고, 지표 소스로만 저장합니다.</small>
           )}
+          {importNotice && <small className="file-import-note">{importNotice}</small>}
         </div>
       </section>
       <Pagination pagination={sourcesPagination} />
@@ -4386,16 +4410,6 @@ function DataCenter({
               <div>
                 <strong>{issue.title}</strong>
                 <span>{issue.detail}</span>
-                <div className="issue-meta">
-                  <span>
-                    <b>영향</b>
-                    {getDataIssueImpact(issue)}
-                  </span>
-                  <span>
-                    <b>{issue.severity === "info" ? "확인" : "조치"}</b>
-                    {getDataIssueAction(issue)}
-                  </span>
-                </div>
               </div>
             </div>
           ))}
@@ -4406,8 +4420,8 @@ function DataCenter({
       <section className="section-panel">
         <div className="section-header">
           <div>
-            <h2>열 매핑</h2>
-            <p>저장된 대표 매핑</p>
+            <h2>지표 매핑</h2>
+            <p>API 필드와 업로드 파일 열이 시스템 지표로 들어오는 방식</p>
           </div>
         </div>
         <div className="table-scroll">

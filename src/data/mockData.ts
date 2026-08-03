@@ -7,7 +7,6 @@ import type {
   CompareGranularity,
   ContentLabSnapshot,
   DataCenterSnapshot,
-  DataSourceState,
   PeriodComparison,
   PeriodMode,
   ChannelId,
@@ -658,54 +657,77 @@ export const dataCenterSnapshot: DataCenterSnapshot = {
   sources: [
     {
       id: "google-youtube",
-      label: "YouTube Analytics",
+      label: "YouTube Analytics API",
       kind: "api",
+      connectionGroup: "api",
+      channels: ["본계 Shorts", "본계 Longform"],
+      cadence: "일 1회 자동 동기화",
       status: "complete",
       lastSync: "2026.07.28 09:10",
-      detail: "본계 채널 · Shorts/롱폼 분리",
+      detail: "본계 Shorts/롱폼 성과를 API로 분리 수집합니다.",
     },
     {
       id: "meta-instagram",
       label: "Instagram Graph API",
       kind: "api",
+      connectionGroup: "api",
+      channels: ["회사 본계 Carousel/Reels", "둠둠로그 Carousel/Reels"],
+      cadence: "일 1회 자동 동기화",
       status: "partial",
       lastSync: "2026.07.28 08:40",
-      detail: "본계/둠둠로그 연결 · 릴스 일부 지표 조건부",
+      detail: "2개 계정과 포맷별 성과를 API로 수집합니다. 릴스 일부 지표는 권한에 따라 조건부입니다.",
     },
     {
       id: "google-website",
       label: "GA4 + Search Console",
       kind: "api",
+      connectionGroup: "api",
+      channels: ["Website KR", "Website EN"],
+      cadence: "일 1회 자동 동기화",
       status: "complete",
       lastSync: "2026.07.28 09:00",
-      detail: "KR/EN 속성 분리",
+      detail: "국문/영문 속성을 분리해 유입, 검색어, 전환 신호를 API로 수집합니다.",
     },
     {
       id: "linkedin-file",
-      label: "LinkedIn 업로드",
+      label: "LinkedIn 파일 업로드",
       kind: "file",
+      connectionGroup: "file",
+      channels: ["게시물 성과 파일"],
+      cadence: "월 1회 또는 필요 시 수동 업로드",
       status: "partial",
       lastSync: "2026.07.26 18:00",
-      detail: "선택 지표 2개 미등록",
+      detail: "LinkedIn은 파일 첨부로 게시물 성과를 누적합니다.",
     },
     {
       id: "naver-file",
-      label: "Naver Blog 업로드",
+      label: "Naver Blog 파일 업로드",
       kind: "file",
+      connectionGroup: "file",
+      channels: ["필수 지표", "유입 분석", "분포/순위"],
+      cadence: "월 1회 수동 업로드",
       status: "partial",
       lastSync: "2026.07.25 10:30",
-      detail: "월간 필수 지표 파일 반영",
+      detail: "조회수, 유입분석, 순방문자수, 방문 횟수, 평균 사용 시간, 재방문율을 월간 파일로 적재합니다.",
     },
     {
       id: "tiktok-file",
-      label: "TikTok 업로드",
+      label: "TikTok 파일 업로드",
       kind: "file",
-      status: "partial",
-      lastSync: "2026.07.25 18:00",
-      detail: "평균 시청시간 미등록",
+      connectionGroup: "file",
+      channels: ["게시물 성과 파일"],
+      cadence: "게시물 운영 시작 후 수동 업로드",
+      status: "not_uploaded",
+      lastSync: "아직 없음",
+      detail: "현재 게시물이 없어 데이터는 받지 않습니다. 업로드 구조만 준비되어 있습니다.",
     },
   ],
   mappingRows: [
+    { raw: "YouTube Analytics: subscribersGained", metric: "subscribers", transform: "계정 현재값 + 기간 증가분", platform: "YouTube" },
+    { raw: "YouTube Analytics: views/watchTime/averageViewDuration", metric: "views_watch_time_avg_view", transform: "Shorts/롱폼 포맷별 집계", platform: "YouTube" },
+    { raw: "Instagram Graph API: followers/reach/views/saves/shares", metric: "instagram_account_metrics", transform: "계정 + 포맷별 집계", platform: "Instagram" },
+    { raw: "GA4: users/sessions/events", metric: "website_behavior", transform: "KR/EN 속성별 집계", platform: "Website" },
+    { raw: "Search Console: queries/clicks/impressions", metric: "website_search_visibility", transform: "국문/영문 검색 성과 분리", platform: "Website" },
     { raw: "조회수", metric: "blog_views", transform: "숫자", platform: "Naver Blog" },
     { raw: "유입분석", metric: "traffic_sources", transform: "유입원별 분해", platform: "Naver Blog" },
     { raw: "순방문자수", metric: "unique_visitors", transform: "숫자", platform: "Naver Blog" },
@@ -718,18 +740,18 @@ export const dataCenterSnapshot: DataCenterSnapshot = {
   issues: [
     {
       severity: "warning",
-      title: "TikTok 평균 시청시간 미등록",
-      detail: "선택 지표이므로 카드에는 N/A로 표시됩니다.",
+      title: "TikTok 게시물 없음",
+      detail: "TikTok은 파일 업로드형 채널이지만 아직 게시물이 없어 성과 수집 대상에서 제외됩니다.",
     },
     {
       severity: "info",
-      title: "LinkedIn 참여율 정의 확인 필요",
-      detail: "파일 제공 값을 우선하고 시스템 계산은 보류합니다.",
+      title: "LinkedIn 파일 업로드형",
+      detail: "LinkedIn은 API 자동 동기화 대상이 아니며, 업로드 파일의 원본 값을 기준으로 지표를 저장합니다.",
     },
     {
       severity: "warning",
       title: "Instagram 릴스 반복 재생 조건부",
-      detail: "API 응답에 값이 있을 때만 노출합니다.",
+      detail: "Instagram은 API 연결형입니다. 릴스 일부 지표는 Graph API 권한과 응답 가능 여부에 따라 표시합니다.",
     },
   ],
 };
@@ -904,55 +926,6 @@ contentLabSnapshot.ads = contentLabSnapshot.ads.map((ad) => {
     sourceContentId: ad.sourceContentId ?? source?.id,
   };
 });
-
-dataCenterSnapshot.sources = [
-  ...dataCenterSnapshot.sources,
-  ...Array.from({ length: 16 }, (_, index): DataSourceState => {
-    const channel = channelIds[index % channelIds.length];
-    const kind = index % 3 === 0 ? "api" : index % 3 === 1 ? "file" : "manual";
-    const status = (["complete", "partial", "not_uploaded", "unavailable"] as const)[index % 4];
-
-    return {
-      id: `source-extra-${index + 1}`,
-      label: `${channelMeta[channel].label} ${kind.toUpperCase()} 소스 ${index + 1}`,
-      kind,
-      status,
-      lastSync: `2026.07.${String(10 + (index % 18)).padStart(2, "0")} ${String(9 + (index % 8)).padStart(2, "0")}:00`,
-      detail:
-        status === "complete"
-          ? "정상 수집"
-          : status === "partial"
-            ? "선택 지표 일부 누락"
-            : status === "not_uploaded"
-              ? "최근 파일 미등록"
-              : "플랫폼 미지원 지표 포함",
-    };
-  }),
-];
-
-dataCenterSnapshot.mappingRows = [
-  ...dataCenterSnapshot.mappingRows,
-  ...Array.from({ length: 26 }, (_, index) => ({
-    raw: `원본 열 ${index + 1}`,
-    metric: `metric_${String(index + 1).padStart(2, "0")}`,
-    transform: index % 4 === 0 ? "숫자" : index % 4 === 1 ? "비율" : index % 4 === 2 ? "시간 → 초" : "문자열",
-    platform: channelMeta[channelIds[index % channelIds.length]].label,
-  })),
-];
-
-dataCenterSnapshot.issues = [
-  ...dataCenterSnapshot.issues,
-  ...Array.from({ length: 22 }, (_, index): DataCenterSnapshot["issues"][number] => ({
-    severity: (["warning", "info", "error"] as const)[index % 3],
-    title: `데이터 점검 항목 ${index + 1}`,
-    detail:
-      index % 3 === 0
-        ? "선택 지표가 일부 누락되어 관련 카드는 일부 데이터로 표시됩니다."
-        : index % 3 === 1
-          ? "업로드 파일의 열 이름 변경 가능성을 확인해야 합니다."
-          : "동일 기간 데이터 중복 가능성이 있어 충돌 검토가 필요합니다.",
-  })),
-];
 
 export function buildPeriodComparison(
   scope: ChannelId,

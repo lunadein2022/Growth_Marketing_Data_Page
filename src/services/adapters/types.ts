@@ -121,6 +121,9 @@ export interface DataSourceState {
   id: string;
   label: string;
   kind: "api" | "file" | "manual";
+  connectionGroup?: "api" | "file";
+  channels?: string[];
+  cadence?: string;
   status: DataStatus;
   lastSync: string;
   detail: string;
