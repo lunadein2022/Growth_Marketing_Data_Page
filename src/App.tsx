@@ -1060,17 +1060,23 @@ function App() {
         nextBriefing = await provider.generateBriefing(request);
       }
 
-      let historyBriefing = nextBriefing;
-      if (authUser && canUseAiBriefingHistory()) {
-        try {
-          historyBriefing = await saveAiBriefingHistory(nextBriefing, request, getBriefingPeriodRange(periodMode));
-        } catch (error) {
-          console.warn("AI briefing history could not be saved.", error);
-        }
-      }
+      setBriefing(nextBriefing);
 
-      setBriefing(historyBriefing);
-      setBriefingHistory((current) => mergeBriefingHistory([historyBriefing], current));
+      if (authUser && canUseAiBriefingHistory()) {
+        void saveAiBriefingHistory(nextBriefing, request, getBriefingPeriodRange(periodMode))
+          .then((historyBriefing) => {
+            setBriefing((current) =>
+              current?.title === nextBriefing.title && current.summary === nextBriefing.summary ? historyBriefing : current,
+            );
+            setBriefingHistory((current) => mergeBriefingHistory([historyBriefing], current));
+          })
+          .catch((error) => {
+            console.warn("AI briefing history could not be saved.", error);
+            setBriefingHistory((current) => mergeBriefingHistory([nextBriefing], current));
+          });
+      } else {
+        setBriefingHistory((current) => mergeBriefingHistory([nextBriefing], current));
+      }
     } finally {
       setGenerating(false);
     }

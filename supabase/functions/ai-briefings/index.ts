@@ -1,21 +1,17 @@
 // Supabase Edge Function: ai-briefings
-// Generates a DummDumm Brand OS AI briefing with Claude (claude-opus-5).
+// Generates a concise DummDumm Brand OS AI briefing with Claude.
 //
-// The API key lives server-side only (Supabase secret ANTHROPIC_API_KEY) and is
-// never exposed to the browser.
-//
-// Deploy:   supabase functions deploy ai-briefings
-// Secret:   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-// Invoke:   POST { request: BriefingRequest, context: BriefingContext }
-//
-// Core rule enforced in the system prompt: the model may ONLY use numbers that
-// appear in `context`. It must never invent metrics. Missing values are marked
-// N/A / "일부 데이터". Output is a single JSON object matching the AiBriefing shape.
+// Deploy: supabase functions deploy ai-briefings
+// Secrets:
+//   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+//   supabase secrets set ANTHROPIC_MODEL=claude-sonnet-5
 
 import Anthropic from "npm:@anthropic-ai/sdk";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
-const MODEL = "claude-opus-5";
+const MODEL = Deno.env.get("ANTHROPIC_MODEL") ?? "claude-sonnet-5";
+const MAX_TOKENS = Number(Deno.env.get("ANTHROPIC_MAX_TOKENS") ?? "1400");
+const MAX_CONTEXT_CHARS = Number(Deno.env.get("AI_BRIEFING_MAX_CONTEXT_CHARS") ?? "12000");
 
 type BriefingRequest = {
   surface: "command" | "channel" | "campaign" | "ad";
@@ -33,54 +29,76 @@ type BriefingContext = {
   [key: string]: unknown;
 };
 
-const SYSTEM_PROMPT = `당신은 DummDumm Inc. 마케팅팀의 브랜드 인텔리전스 분석가입니다.
-멀티채널(YouTube·Instagram·Naver·TikTok·LinkedIn·Website) 마케팅 성과를 바탕으로 간결한 한국어 AI 보고서를 작성합니다.
+const SYSTEM_PROMPT = [
+  "당신은 DummDumm Inc. 마케팅 대시보드의 AI 브리핑 분석가입니다.",
+  "반드시 제공된 context 안의 수치와 문장만 근거로 사용합니다.",
+  "없는 수치, 비율, 플랫폼 성과를 추측하거나 만들어내지 않습니다.",
+  "마케터가 바로 판단할 수 있게 짧고 실행 중심으로 씁니다.",
+  "출력은 코드블록 없이 JSON 객체 하나만 반환합니다.",
+  "필수 키: title, periodLabel, summary, dataSources, dataWarnings, wins, risks, actions, evidence",
+  "wins/risk/actions/evidence 배열은 각각 최대 4개, 각 항목은 한 문장으로 제한합니다.",
+].join("\n");
 
-절대 규칙:
-1. context에 실제로 존재하는 수치만 사용합니다. context에 없는 숫자·비율·증감은 절대 만들어내지 않습니다.
-2. 데이터가 부분적이거나 없으면 "N/A" 또는 "일부 데이터"로 표시하고 dataWarnings에 명시합니다.
-3. evidence에는 context에서 인용한 구체 수치만 넣습니다(예: "Website 사용자 10,657 → 12,840 (+20%)"). 근거가 없으면 evidence를 빈 배열로 둡니다.
-4. summary/wins/risks/actions는 근거 있는 해석과 실행 제안만 담고, 과장하지 않습니다.
+function labelPeriod(mode: BriefingRequest["periodMode"]) {
+  return mode === "weekly" ? "주간" : "월간";
+}
 
-출력 형식(매우 중요):
-- 오직 하나의 JSON 객체만 출력합니다. 코드펜스(\`\`\`), 설명 문장, 앞뒤 텍스트를 절대 붙이지 않습니다.
-- 키: title(string), periodLabel(string), summary(string), dataSources(string[]),
-  dataWarnings(string[]), wins(string[]), risks(string[]), actions(string[]), evidence(string[]).`;
+function labelTarget(request: BriefingRequest) {
+  if (request.ad) return request.ad;
+  if (request.campaign) return request.campaign;
+  if (request.channel) return request.channel;
+  if (request.surface === "command") return "Brand Command Center";
+  if (request.surface === "campaign") return "캠페인";
+  if (request.surface === "ad") return "광고";
+  return "채널";
+}
 
 function buildUserPrompt(request: BriefingRequest, context: BriefingContext): string {
-  const periodWord = request.periodMode === "weekly" ? "주간" : "월간";
-  const target =
-    request.ad ??
-    request.campaign ??
-    request.channel ??
-    (request.surface === "command" ? "Brand Command Center" : request.surface);
+  const compactContext = JSON.stringify({
+    periodLabel: context.periodLabel,
+    dataSources: context.dataSources ?? [],
+    dataWarnings: context.dataWarnings ?? [],
+    figures: context.figures ?? {},
+  });
+  const contextText =
+    compactContext.length > MAX_CONTEXT_CHARS
+      ? `${compactContext.slice(0, MAX_CONTEXT_CHARS)}... [context truncated]`
+      : compactContext;
 
   return [
-    `분석 대상: ${target}`,
-    `보고 주기: ${periodWord} (surface=${request.surface})`,
-    "",
-    "아래 context가 유일한 사실 출처입니다. 여기에 없는 수치는 사용하지 마세요.",
-    "```json",
-    JSON.stringify(context, null, 2),
-    "```",
-    "",
-    `title은 "${target} ${periodWord} AI 보고서" 형식을 기본으로 하되 자연스럽게 다듬어도 됩니다.`,
-    "periodLabel은 context.periodLabel이 있으면 그대로, 없으면 보고 주기에 맞춰 자연스럽게 만드세요.",
-    "다시 강조: JSON 객체 하나만, 다른 텍스트 없이 출력하세요.",
+    `대상: ${labelTarget(request)}`,
+    `보고 주기: ${labelPeriod(request.periodMode)} (surface=${request.surface})`,
+    "아래 context만 사용해서 한국어 브리핑 JSON을 생성하세요.",
+    "summary는 2문장 이내, actions는 담당자가 오늘 바로 할 일 중심으로 작성하세요.",
+    "dataWarnings에는 기존 경고와 추가로 확인해야 할 누락 데이터를 넣으세요.",
+    `context: ${contextText}`,
   ].join("\n");
 }
 
-// Tolerant JSON extraction: strips code fences and grabs the outermost object.
 function extractJson(text: string): unknown {
   let cleaned = text.trim();
   const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fence) cleaned = fence[1].trim();
+
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
   if (start !== -1 && end !== -1 && end > start) {
     cleaned = cleaned.slice(start, end + 1);
   }
+
   return JSON.parse(cleaned);
+}
+
+function toString(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function toStringArray(value: unknown, limit: number) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim())
+    .slice(0, limit);
 }
 
 Deno.serve(async (req) => {
@@ -90,8 +108,6 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") {
     return jsonResponse({ error: "Method not allowed" }, 405);
   }
-
-  // Require an authenticated caller (Supabase forwards the user's JWT here).
   if (!req.headers.get("Authorization")) {
     return jsonResponse({ error: "Missing Authorization header" }, 401);
   }
@@ -119,12 +135,11 @@ Deno.serve(async (req) => {
   try {
     const message = await client.messages.create({
       model: MODEL,
-      max_tokens: 4096,
+      max_tokens: MAX_TOKENS,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: buildUserPrompt(request, context) }],
     });
 
-    // Safety classifiers can decline (HTTP 200 with stop_reason "refusal").
     if (message.stop_reason === "refusal") {
       return jsonResponse({ error: "The request was declined by safety filters." }, 422);
     }
@@ -140,21 +155,20 @@ Deno.serve(async (req) => {
     try {
       parsed = extractJson(textBlock.text) as Record<string, unknown>;
     } catch {
-      return jsonResponse({ error: "모델 응답을 JSON으로 파싱하지 못했습니다." }, 502);
+      return jsonResponse({ error: "Model response could not be parsed as JSON." }, 502);
     }
 
     const briefing = {
-      title: "",
-      periodLabel: context.periodLabel ?? "",
-      summary: "",
-      dataSources: [],
-      dataWarnings: [],
-      wins: [],
-      risks: [],
-      actions: [],
-      evidence: [],
-      ...parsed,
+      title: toString(parsed.title, `${labelTarget(request)} ${labelPeriod(request.periodMode)} AI 보고서`),
       generatedAt: new Date().toISOString(),
+      periodLabel: toString(parsed.periodLabel, context.periodLabel ?? labelPeriod(request.periodMode)),
+      dataSources: toStringArray(parsed.dataSources, 8),
+      dataWarnings: toStringArray(parsed.dataWarnings, 6),
+      summary: toString(parsed.summary, "제공된 데이터 기준으로 생성할 수 있는 요약이 부족합니다."),
+      wins: toStringArray(parsed.wins, 4),
+      risks: toStringArray(parsed.risks, 4),
+      actions: toStringArray(parsed.actions, 4),
+      evidence: toStringArray(parsed.evidence, 4),
     };
 
     return jsonResponse(briefing);
