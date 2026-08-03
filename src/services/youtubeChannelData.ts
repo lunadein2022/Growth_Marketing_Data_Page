@@ -1,4 +1,4 @@
-import type { ChannelMetric, ChannelView, ContentItem, DataStatus, PeriodMode, TrendPoint } from "./adapters/types";
+import type { ChannelMetric, ChannelView, ContentItem, ContentLabSnapshot, DataStatus, PeriodMode, TrendPoint } from "./adapters/types";
 import { getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
@@ -322,4 +322,45 @@ export async function loadYoutubeChannelPatch(periodMode: PeriodMode): Promise<P
 export function applyYoutubeChannelPatch(channels: ChannelView[], patch: Partial<ChannelView> | null): ChannelView[] {
   if (!patch) return channels;
   return channels.map((channel) => (channel.id === "youtube" ? { ...channel, ...patch } : channel));
+}
+
+function buildYoutubeArchiveItem(item: ContentItem): ContentItem {
+  const sourcePostId = item.linkedPostId ?? item.id;
+
+  return {
+    ...item,
+    id: `source-youtube-${sourcePostId}`,
+    status: "Published - API",
+    campaign: item.campaign ?? "YouTube API",
+    linkedPostId: sourcePostId,
+    linkedPostTitle: item.title,
+    performanceSource: item.performanceSource
+      ? `${item.performanceSource} - YouTube API`
+      : "YouTube Data API + Analytics API",
+    decisionLogs: [
+      `${item.publishDate} - YouTube source post linked`,
+      ...(item.decisionLogs ?? []),
+    ],
+  };
+}
+
+export function applyYoutubeContentToContentLab(
+  data: ContentLabSnapshot,
+  patch: Partial<ChannelView> | null,
+): ContentLabSnapshot {
+  const items = patch?.topContent ?? [];
+  if (!items.length) return data;
+
+  const archiveItems = items.map(buildYoutubeArchiveItem);
+  const sourceIds = new Set(archiveItems.map((item) => item.linkedPostId ?? item.id));
+  const existingArchive = data.archive.filter((item) => {
+    if (item.id.startsWith("source-youtube-")) return false;
+    if (item.channel !== "youtube") return true;
+    return !sourceIds.has(item.linkedPostId ?? item.id);
+  });
+
+  return {
+    ...data,
+    archive: [...archiveItems, ...existingArchive],
+  };
 }

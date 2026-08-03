@@ -68,6 +68,7 @@ import {
 } from "./services/youtubeSync";
 import {
   applyYoutubeChannelPatch,
+  applyYoutubeContentToContentLab,
   buildYoutubeKpisFromContent,
   canLoadYoutubeChannelData,
   loadYoutubeChannelPatch,
@@ -914,6 +915,7 @@ function App() {
   const [naverMonthlyReports, setNaverMonthlyReports] = useState<NaverMonthlyReport[]>([]);
   const naverMonthlyReportRef = useRef<NaverMonthlyReport | null>(null);
   const naverMonthlyReportsRef = useRef<NaverMonthlyReport[]>([]);
+  const youtubeChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const authConfigured = hasAuthConfig();
   const channelDataSignature = useMemo(
     () => channels.map((channel) => `${channel.id}:${channel.updatedAt}:${channel.source}`).join("|"),
@@ -961,7 +963,9 @@ function App() {
     loadYoutubeChannelPatch(periodMode)
       .then((patch) => {
         if (!mounted || !patch) return;
+        youtubeChannelPatchRef.current = patch;
         setChannels((current) => applyYoutubeChannelPatch(current, patch));
+        setContentLab((current) => (current ? applyYoutubeContentToContentLab(current, patch) : current));
       })
       .catch((error) => {
         console.warn("Saved YouTube channel data could not be loaded.", error);
@@ -1146,8 +1150,9 @@ function App() {
   };
 
   const replaceContentLab = (nextContentLab: ContentLabSnapshot) => {
-    setContentLab(nextContentLab);
-    return nextContentLab;
+    const mergedContentLab = applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current);
+    setContentLab(mergedContentLab);
+    return mergedContentLab;
   };
 
   const handleSaveContentCard = async (card: ContentItem) => replaceContentLab(await provider.upsertContentCard(card, periodMode));
@@ -1155,8 +1160,19 @@ function App() {
     replaceContentLab(await provider.moveContentCard(contentId, status, periodMode));
   const handleDeleteContentCard = async (contentId: string) =>
     replaceContentLab(await provider.deleteContentCard(contentId, periodMode));
-  const handleCreateCampaignFromContent = async (sourceContentId?: string) =>
-    replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
+  const handleCreateCampaignFromContent = async (sourceContentId?: string) => {
+    if (contentLab) {
+      const generatedCampaign = buildGeneratedCampaignFromContentLab(contentLab, sourceContentId);
+      if (generatedCampaign) {
+        return replaceContentLab({
+          ...contentLab,
+          campaigns: [generatedCampaign, ...contentLab.campaigns],
+        });
+      }
+    }
+
+    return replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
+  };
   const handleSaveAd = async (ad: AdContent) => replaceContentLab(await provider.upsertAd(ad, periodMode));
   const handleDeleteAd = async (adId: string) => replaceContentLab(await provider.deleteAd(adId, periodMode));
   const handleSignIn = async () => {
@@ -1248,7 +1264,10 @@ function App() {
       setYoutubeSyncResult(result);
       void loadYoutubeChannelPatch(periodMode)
         .then((patch) => {
-          if (patch) setChannels((current) => applyYoutubeChannelPatch(current, patch));
+          if (!patch) return;
+          youtubeChannelPatchRef.current = patch;
+          setChannels((current) => applyYoutubeChannelPatch(current, patch));
+          setContentLab((current) => (current ? applyYoutubeContentToContentLab(current, patch) : current));
         })
         .catch((error) => {
           console.warn("YouTube channel data could not be refreshed after sync.", error);
@@ -3012,6 +3031,10 @@ function hasCollectedPerformance(item: ContentItem) {
   );
 }
 
+function getContentSourceId(item: ContentItem) {
+  return item.linkedPostId ?? item.id;
+}
+
 function filterContentItems(items: ContentItem[], query: string) {
   const keyword = query.trim().toLowerCase();
   if (!keyword) return items;
@@ -3262,7 +3285,7 @@ function ContentCardEditor({
       publishDate: post.publishDate,
       metricLabel: post.metricLabel,
       metricValue: post.metricValue,
-      linkedPostId: post.id,
+      linkedPostId: getContentSourceId(post),
       linkedPostTitle: post.title,
       performanceSource: post.performanceSource,
       externalUrl: getContentExternalUrl(post),
@@ -3463,6 +3486,68 @@ function getCampaignUploadPeriod(data: ContentLabSnapshot, campaign: CampaignRow
 
   if (dates.length === 0) return "기간 미연결";
   return dates.length === 1 ? formatShortDate(dates[0]) : `${formatShortDate(dates[0])} - ${formatShortDate(dates[dates.length - 1])}`;
+}
+
+function getCampaignTopicFromContent(item: ContentItem) {
+  const campaign = item.campaign?.trim();
+  if (campaign && !/없음|API|Analytics/i.test(campaign)) return campaign;
+
+  const titleTopic = item.title
+    .replace(/\[[^\]]+\]/g, "")
+    .split(/[|#]/)[0]
+    .trim();
+
+  return titleTopic || item.title.slice(0, 40);
+}
+
+function buildGeneratedCampaignFromContentLab(data: ContentLabSnapshot, sourceContentId?: string): CampaignRow | null {
+  const candidates = [...data.pipeline, ...data.archive]
+    .filter(hasCollectedPerformance)
+    .sort((a, b) => parseMetricScore(b.metricValue) - parseMetricScore(a.metricValue));
+  const source =
+    candidates.find((item) => item.id === sourceContentId || getContentSourceId(item) === sourceContentId) ?? candidates[0];
+  if (!source) return null;
+
+  const topic = getCampaignTopicFromContent(source);
+  const topicSeed = topic.split(/\s+/)[0] || topic;
+  const related = candidates
+    .filter(
+      (item) =>
+        getContentSourceId(item) === getContentSourceId(source) ||
+        (source.campaignId && item.campaignId === source.campaignId) ||
+        (source.campaign && item.campaign === source.campaign) ||
+        item.title.includes(topic) ||
+        item.title.includes(topicSeed),
+    )
+    .slice(0, 12);
+  const relatedContent = related.length ? related : [source];
+  const byChannel = (channel: ContentItem["channel"]) =>
+    relatedContent
+      .filter((item) => item.channel === channel)
+      .sort((a, b) => parseMetricScore(b.metricValue) - parseMetricScore(a.metricValue))[0];
+  const metricFor = (channel: ContentItem["channel"]) => {
+    const item = byChannel(channel);
+    return item ? `${item.metricValue} ${item.metricLabel}` : undefined;
+  };
+  const bestItem = [...relatedContent].sort((a, b) => parseMetricScore(b.metricValue) - parseMetricScore(a.metricValue))[0] ?? source;
+
+  return {
+    id: `camp-auto-${getContentSourceId(source)}-${Date.now()}`,
+    campaign: `${topic} 캠페인`,
+    objective: "연결된 실제 게시물 기반 자동 생성",
+    contentIds: relatedContent.map(getContentSourceId),
+    contentCount: relatedContent.length,
+    linkedPostCount: relatedContent.filter(hasCollectedPerformance).length,
+    adCount: 0,
+    youtube: metricFor("youtube"),
+    tiktok: metricFor("tiktok"),
+    instagram: metricFor("instagram"),
+    linkedin: metricFor("linkedin"),
+    naver: metricFor("naver"),
+    website: metricFor("website"),
+    total: `콘텐츠 ${relatedContent.length}개 · 연결 ${relatedContent.filter(hasCollectedPerformance).length}개`,
+    bestChannel: channelMeta[bestItem.channel].label,
+  };
 }
 
 function getCampaignChannelRows(campaign: CampaignRow) {
@@ -4135,7 +4220,7 @@ function AdContentEditor({
       channel: item.channel,
       campaignId: item.campaignId ?? getCampaignIdByName(campaigns, item.campaign ?? form.campaign),
       campaign: item.campaign ?? form.campaign,
-      sourceContentId: item.id,
+      sourceContentId: getContentSourceId(item),
       sourceContent: item.title,
       linkedPostTitle: item.title,
       performanceSource: item.performanceSource
