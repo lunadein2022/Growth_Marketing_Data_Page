@@ -17,6 +17,7 @@ const ORG_ID = "00000000-0000-0000-0000-000000000001";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const YOUTUBE_DATA_BASE = "https://www.googleapis.com/youtube/v3";
 const YOUTUBE_ANALYTICS_BASE = "https://youtubeanalytics.googleapis.com/v2/reports";
+const YOUTUBE_ANALYTICS_TOP_VIDEO_LIMIT = 200;
 const YOUTUBE_SCOPES = [
   "https://www.googleapis.com/auth/youtube.readonly",
   "https://www.googleapis.com/auth/yt-analytics.readonly",
@@ -384,7 +385,7 @@ Deno.serve(async (req) => {
       metrics: "views,estimatedMinutesWatched,averageViewDuration",
       dimensions: "video",
       sort: "-views",
-      maxResults: maxVideos,
+      maxResults: Math.min(maxVideos, YOUTUBE_ANALYTICS_TOP_VIDEO_LIMIT),
     });
 
     const analyticsVideoIds = videoAnalyticsRows.map((row) => String(row.video ?? "")).filter(Boolean);
