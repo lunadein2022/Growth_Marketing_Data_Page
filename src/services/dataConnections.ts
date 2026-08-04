@@ -194,5 +194,11 @@ export function inferFileImportChannel(fileName: string): FileImportChannel | nu
   if (/linkedin|링크드인/.test(source)) return "linkedin";
   if (/tiktok|틱톡/.test(source)) return "tiktok";
   if (/naver|네이버|blog|블로그|원고|후기|추천|조회수|유입|순방문|방문|재방문|평균\s*사용|성연령|성\/연령|국가|공감|댓글|순위/.test(source)) return "naver";
+  // LinkedIn analytics exports carry no brand token in the filename — they use
+  // the content/followers/visitors stems (English) or 콘텐츠/팔로워/방문자 통계
+  // (Korean). Checked after Naver so Naver's 방문/조회 keywords win first
+  // (e.g. 순방문자수 → naver, not linkedin). The parser is sheet-name based, so a
+  // false positive is still filtered out downstream.
+  if (/(^|[^a-z])(content|followers|visitors)([^a-z]|$)|콘텐츠|팔로워|방문자\s*통계/.test(source)) return "linkedin";
   return null;
 }

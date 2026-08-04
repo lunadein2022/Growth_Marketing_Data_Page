@@ -94,6 +94,17 @@ import {
 } from "./services/linkedinChannelData";
 import { parseLinkedinFiles } from "./services/linkedinParser";
 import {
+  applyWebsiteChannelPatch,
+  applyWebsiteContentToContentLab,
+  canLoadWebsiteChannelData,
+  loadWebsiteChannelPatch,
+} from "./services/websiteChannelData";
+import {
+  canSyncWebsiteAnalytics,
+  syncWebsiteAnalytics,
+  type WebsiteSyncState,
+} from "./services/websiteSync";
+import {
   applyCommandCenterPatch,
   canLoadCommandCenterData,
   loadCommandCenterPatch,
@@ -1007,6 +1018,8 @@ function App() {
   const [youtubeSyncResult, setYoutubeSyncResult] = useState<YoutubeSyncState | null>(null);
   const [instagramSyncing, setInstagramSyncing] = useState(false);
   const [instagramSyncResult, setInstagramSyncResult] = useState<InstagramSyncState | null>(null);
+  const [websiteSyncing, setWebsiteSyncing] = useState(false);
+  const [websiteSyncResult, setWebsiteSyncResult] = useState<WebsiteSyncState | null>(null);
   const [authUser, setAuthUser] = useState<DashboardUser | null>(null);
   const [authBusy, setAuthBusy] = useState(false);
   const [naverMonthlyReport, setNaverMonthlyReport] = useState<NaverMonthlyReport | null>(null);
@@ -1016,6 +1029,7 @@ function App() {
   const youtubeChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const instagramChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const linkedinChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
+  const websiteChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const authConfigured = hasAuthConfig();
   const channelDataSignature = useMemo(
     () => channels.map((channel) => `${channel.id}:${channel.updatedAt}:${channel.source}`).join("|"),
@@ -1111,6 +1125,27 @@ function App() {
       })
       .catch((error) => {
         console.warn("Saved LinkedIn channel data could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
+
+  useEffect(() => {
+    if (!authUser || !canLoadWebsiteChannelData() || channels.length === 0) return;
+
+    let mounted = true;
+
+    loadWebsiteChannelPatch(periodMode)
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        websiteChannelPatchRef.current = patch;
+        setChannels((current) => applyWebsiteChannelPatch(current, patch));
+        setContentLab((current) => (current ? applyWebsiteContentToContentLab(current, patch) : current));
+      })
+      .catch((error) => {
+        console.warn("Saved website channel data could not be loaded.", error);
       });
 
     return () => {
@@ -1311,12 +1346,15 @@ function App() {
   };
 
   const replaceContentLab = (nextContentLab: ContentLabSnapshot) => {
-    const mergedContentLab = applyLinkedinContentToContentLab(
-      applyInstagramContentToContentLab(
-        applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current),
-        instagramChannelPatchRef.current,
+    const mergedContentLab = applyWebsiteContentToContentLab(
+      applyLinkedinContentToContentLab(
+        applyInstagramContentToContentLab(
+          applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current),
+          instagramChannelPatchRef.current,
+        ),
+        linkedinChannelPatchRef.current,
       ),
-      linkedinChannelPatchRef.current,
+      websiteChannelPatchRef.current,
     );
     setContentLab(mergedContentLab);
     return mergedContentLab;
@@ -1582,6 +1620,81 @@ function App() {
     }
   };
 
+  const handleSyncWebsite = async () => {
+    if (websiteSyncing) return;
+
+    if (!canSyncWebsiteAnalytics()) {
+      setWebsiteSyncResult({ status: "error", message: "Supabase 환경변수가 없어 홈페이지 API 동기화를 실행할 수 없습니다." });
+      return;
+    }
+
+    if (!authUser) {
+      setWebsiteSyncResult({ status: "error", message: "Google 로그인 후 홈페이지 API 동기화를 실행할 수 있습니다." });
+      return;
+    }
+
+    const range = getBriefingPeriodRange(periodMode);
+    setWebsiteSyncing(true);
+    setWebsiteSyncResult(null);
+
+    try {
+      const result = await syncWebsiteAnalytics({
+        periodMode,
+        startDate: range.start,
+        endDate: range.end,
+        maxPages: 20,
+      });
+      setWebsiteSyncResult(result);
+      void loadWebsiteChannelPatch(periodMode)
+        .then((patch) => {
+          if (!patch) return;
+          websiteChannelPatchRef.current = patch;
+          setChannels((current) => applyWebsiteChannelPatch(current, patch));
+          setContentLab((current) => (current ? applyWebsiteContentToContentLab(current, patch) : current));
+        })
+        .catch((error) => {
+          console.warn("Website channel data could not be refreshed after sync.", error);
+        });
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "google-website"
+                  ? {
+                      ...source,
+                      status: result.overallStatus,
+                      lastSync: formatImportTimestamp(),
+                      detail: `홈페이지 ${result.periodStart}~${result.periodEnd} · 속성 ${result.accounts.length}개 · 페이지 ${result.accounts.reduce(
+                        (total, account) => total + account.pagesSynced,
+                        0,
+                      )}개 저장`,
+                    }
+                  : source,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setWebsiteSyncResult({
+        status: "error",
+        message: error instanceof Error ? error.message : "홈페이지 API 동기화 실패",
+      });
+      setDataCenter((current) =>
+        current
+          ? {
+              ...current,
+              sources: current.sources.map((source) =>
+                source.id === "google-website" ? { ...source, status: "error", lastSync: formatImportTimestamp() } : source,
+              ),
+            }
+          : current,
+      );
+    } finally {
+      setWebsiteSyncing(false);
+    }
+  };
+
   const ready = snapshot && contentLab && dataCenter && channels.length > 0;
 
   return (
@@ -1707,11 +1820,14 @@ function App() {
                 youtubeSyncResult={youtubeSyncResult}
                 instagramSyncing={instagramSyncing}
                 instagramSyncResult={instagramSyncResult}
+                websiteSyncing={websiteSyncing}
+                websiteSyncResult={websiteSyncResult}
                 onSignIn={handleSignIn}
                 onSignOut={handleSignOut}
                 onImportFiles={handleImportFiles}
                 onSyncYouTube={handleSyncYouTube}
                 onSyncInstagram={handleSyncInstagram}
+                onSyncWebsite={handleSyncWebsite}
               />
             )}
 
@@ -4694,11 +4810,14 @@ function DataCenter({
   youtubeSyncResult,
   instagramSyncing,
   instagramSyncResult,
+  websiteSyncing,
+  websiteSyncResult,
   onSignIn,
   onSignOut,
   onImportFiles,
   onSyncYouTube,
   onSyncInstagram,
+  onSyncWebsite,
 }: {
   data: DataCenterSnapshot;
   importing: boolean;
@@ -4711,11 +4830,14 @@ function DataCenter({
   youtubeSyncResult: YoutubeSyncState | null;
   instagramSyncing: boolean;
   instagramSyncResult: InstagramSyncState | null;
+  websiteSyncing: boolean;
+  websiteSyncResult: WebsiteSyncState | null;
   onSignIn: () => void;
   onSignOut: () => void;
   onImportFiles: (files: File[]) => void;
   onSyncYouTube: () => void;
   onSyncInstagram: () => void;
+  onSyncWebsite: () => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourcesPagination = usePaginatedItems(data.sources);
@@ -4846,6 +4968,25 @@ function DataCenter({
                       (total, account) => total + account.mediaSynced,
                       0,
                     )}개 게시물 저장 · ${instagramSyncResult.rowsWritten}행 처리`}
+              </small>
+            )}
+            {source.id === "google-website" && (
+              <div className="source-action-row">
+                <button className="button secondary small" disabled={websiteSyncing || !authUser} onClick={onSyncWebsite}>
+                  {websiteSyncing ? <Loader2 size={14} className="spin" /> : <RefreshCw size={14} />}
+                  홈페이지 동기화
+                </button>
+                {!authUser && <span>Google 로그인 필요</span>}
+              </div>
+            )}
+            {source.id === "google-website" && websiteSyncResult && (
+              <small className={`sync-note ${websiteSyncResult.status === "error" ? "error" : websiteSyncResult.overallStatus}`}>
+                {websiteSyncResult.status === "error"
+                  ? websiteSyncResult.message
+                  : `${websiteSyncResult.accounts.length}개 속성 · 페이지 ${websiteSyncResult.accounts.reduce(
+                      (total, account) => total + account.pagesSynced,
+                      0,
+                    )}개 저장 · ${websiteSyncResult.rowsWritten}행 처리`}
               </small>
             )}
           </div>

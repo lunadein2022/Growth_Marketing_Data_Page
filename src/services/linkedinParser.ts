@@ -95,6 +95,11 @@ function sheetRows(workbook: XLSX.WorkBook, sheetName: string): Rows {
 }
 
 function findHeaderRow(rows: Rows, marker: string): number {
+  // Some LinkedIn sheets (e.g. 통계) put a description sentence in row 0 that
+  // itself contains the marker word ("…날짜: …"), so prefer an exact first-cell
+  // match on the real header row and only fall back to a substring match.
+  const exact = rows.findIndex((row) => Array.isArray(row) && text(row[0]) === marker);
+  if (exact >= 0) return exact;
   return rows.findIndex((row) => Array.isArray(row) && text(row[0]).includes(marker));
 }
 
@@ -128,9 +133,9 @@ function parseContentSheet(report: LinkedinReport, rows: Rows) {
     if (reactCol >= 0) reactions.push({ date, value: num(row[reactCol]) });
   }
 
-  if (impressions.length) report.series.impressions = impressions;
-  if (clicks.length) report.series.clicks = clicks;
-  if (reactions.length) report.series.reactions = reactions;
+  mergeSeriesPoints(report, "impressions", impressions);
+  mergeSeriesPoints(report, "clicks", clicks);
+  mergeSeriesPoints(report, "reactions", reactions);
 }
 
 function parsePostsSheet(report: LinkedinReport, rows: Rows) {
@@ -193,7 +198,7 @@ function parseFollowersSheet(report: LinkedinReport, rows: Rows) {
     if (!date) continue;
     points.push({ date, value: num(row[totalCol]) });
   }
-  if (points.length) report.series.new_followers = points;
+  mergeSeriesPoints(report, "new_followers", points);
 }
 
 function parseVisitorsSheet(report: LinkedinReport, rows: Rows) {
@@ -213,12 +218,23 @@ function parseVisitorsSheet(report: LinkedinReport, rows: Rows) {
     if (viewsCol >= 0) views.push({ date, value: num(row[viewsCol]) });
     if (uniqueCol >= 0) unique.push({ date, value: num(row[uniqueCol]) });
   }
-  if (views.length) report.series.page_views = views;
-  if (unique.length) report.series.unique_visitors = unique;
+  mergeSeriesPoints(report, "page_views", views);
+  mergeSeriesPoints(report, "unique_visitors", unique);
 }
 
 function sumSeries(points?: LinkedinDailyPoint[]): number {
   return (points ?? []).reduce((total, point) => total + point.value, 0);
+}
+
+// Merge daily points across multiple uploaded files, keyed by date. LinkedIn's
+// daily value for a given date is absolute, so overlapping exports must NOT be
+// summed — later files win per date. Keeps the series sorted by date.
+function mergeSeriesPoints(report: LinkedinReport, key: LinkedinSeriesKey, points: LinkedinDailyPoint[]) {
+  if (!points.length) return;
+  const byDate = new Map<string, LinkedinDailyPoint>();
+  for (const point of report.series[key] ?? []) byDate.set(point.date, point);
+  for (const point of points) byDate.set(point.date, point);
+  report.series[key] = Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
 }
 
 function looksLikeLinkedin(workbook: XLSX.WorkBook): boolean {
@@ -263,6 +279,14 @@ export async function parseLinkedinFiles(files: File[]): Promise<LinkedinReport 
   }
 
   if (!matched) return null;
+
+  // Dedupe posts that appear in more than one uploaded content export (later
+  // occurrence wins), so overlapping date ranges don't double-count posts.
+  if (report.posts.length) {
+    const byPostId = new Map<string, LinkedinPost>();
+    for (const post of report.posts) byPostId.set(post.postId, post);
+    report.posts = Array.from(byPostId.values());
+  }
 
   // Period range from every daily series.
   const allDates = Object.values(report.series)
