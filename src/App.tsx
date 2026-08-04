@@ -86,6 +86,19 @@ import {
   loadInstagramChannelPatch,
 } from "./services/instagramChannelData";
 import {
+  applyLinkedinChannelPatch,
+  applyLinkedinContentToContentLab,
+  canLoadLinkedinChannelData,
+  loadLinkedinChannelPatch,
+  persistLinkedinReport,
+} from "./services/linkedinChannelData";
+import { parseLinkedinFiles } from "./services/linkedinParser";
+import {
+  applyCommandCenterPatch,
+  canLoadCommandCenterData,
+  loadCommandCenterPatch,
+} from "./services/commandCenterData";
+import {
   canComparePeriods,
   computePeriodComparison,
   type DateRange,
@@ -1002,6 +1015,7 @@ function App() {
   const naverMonthlyReportsRef = useRef<NaverMonthlyReport[]>([]);
   const youtubeChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const instagramChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
+  const linkedinChannelPatchRef = useRef<Partial<ChannelView> | null>(null);
   const authConfigured = hasAuthConfig();
   const channelDataSignature = useMemo(
     () => channels.map((channel) => `${channel.id}:${channel.updatedAt}:${channel.source}`).join("|"),
@@ -1082,6 +1096,47 @@ function App() {
       mounted = false;
     };
   }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
+
+  useEffect(() => {
+    if (!authUser || !canLoadLinkedinChannelData() || channels.length === 0) return;
+
+    let mounted = true;
+
+    loadLinkedinChannelPatch(periodMode)
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        linkedinChannelPatchRef.current = patch;
+        setChannels((current) => applyLinkedinChannelPatch(current, patch));
+        setContentLab((current) => (current ? applyLinkedinContentToContentLab(current, patch) : current));
+      })
+      .catch((error) => {
+        console.warn("Saved LinkedIn channel data could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
+
+  useEffect(() => {
+    if (!authUser || !canLoadCommandCenterData() || !snapshot) return;
+
+    let mounted = true;
+
+    loadCommandCenterPatch(periodMode)
+      .then((patch) => {
+        if (!mounted || !patch) return;
+        setSnapshot((current) => (current ? applyCommandCenterPatch(current, patch) : current));
+      })
+      .catch((error) => {
+        console.warn("Command Center real data could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authUser?.uid, periodMode, snapshot ? "ready" : "empty", channelDataSignature]);
 
   useEffect(() => {
     if (!authUser || !canLoadDataCenterSyncStatus()) return;
@@ -1256,9 +1311,12 @@ function App() {
   };
 
   const replaceContentLab = (nextContentLab: ContentLabSnapshot) => {
-    const mergedContentLab = applyInstagramContentToContentLab(
-      applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current),
-      instagramChannelPatchRef.current,
+    const mergedContentLab = applyLinkedinContentToContentLab(
+      applyInstagramContentToContentLab(
+        applyYoutubeContentToContentLab(nextContentLab, youtubeChannelPatchRef.current),
+        instagramChannelPatchRef.current,
+      ),
+      linkedinChannelPatchRef.current,
     );
     setContentLab(mergedContentLab);
     return mergedContentLab;
@@ -1327,9 +1385,39 @@ function App() {
         naverMonthlyReports: naverImport?.monthlyReports ?? [],
       };
       const persistence = await persistImportedFilesToSupabase(files, result, authUser);
+
+      // LinkedIn analytics exports (.xls) → parse + normalize into the DB.
+      let linkedinNote = "";
+      const linkedinReport = await parseLinkedinFiles(files).catch((error) => {
+        linkedinNote = error instanceof Error ? error.message : "링크드인 파일 파싱 실패";
+        return null;
+      });
+      if (linkedinReport && authUser) {
+        const linkedinPersist = await persistLinkedinReport(linkedinReport);
+        linkedinNote = linkedinPersist.message;
+        if (linkedinPersist.status === "saved") {
+          void loadLinkedinChannelPatch(periodMode)
+            .then((patch) => {
+              if (!patch) return;
+              linkedinChannelPatchRef.current = patch;
+              setChannels((current) => applyLinkedinChannelPatch(current, patch));
+              setContentLab((current) => (current ? applyLinkedinContentToContentLab(current, patch) : current));
+            })
+            .catch((error) => {
+              console.warn("LinkedIn channel data could not be refreshed after import.", error);
+            });
+        }
+      } else if (linkedinReport && !authUser) {
+        linkedinNote = "Google 로그인 후 링크드인 데이터를 저장할 수 있습니다.";
+      }
+
+      const notes = [
+        naverParseError ? `네이버 파싱 실패: ${naverParseError}` : "",
+        linkedinNote,
+      ].filter(Boolean);
       const nextPersistence =
-        naverParseError && persistence.status === "saved"
-          ? { ...persistence, message: `${persistence.message} · 네이버 파싱 실패: ${naverParseError}` }
+        notes.length && persistence.status === "saved"
+          ? { ...persistence, message: [persistence.message, ...notes].join(" · ") }
           : persistence;
       setDataCenter((current) => (current ? applyImportToDataCenter(current, result) : current));
       setContentLab((current) => (current ? applyImportToContentLab(current, result) : current));

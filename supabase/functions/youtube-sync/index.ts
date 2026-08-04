@@ -288,10 +288,44 @@ function parseIsoDurationSeconds(value: string | undefined) {
   return Number(days) * 86400 + Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
 }
 
-function classifyFormat(video: YouTubeVideoResource) {
+// A real Short serves the /shorts/{id} URL with 200; a regular video redirects
+// (3xx) to /watch. Returns null when the response is inconclusive.
+async function shortsUrlIs200(videoId: string): Promise<boolean | null> {
+  try {
+    const response = await fetch(`https://www.youtube.com/shorts/${videoId}`, {
+      method: "GET",
+      redirect: "manual",
+      headers: { "user-agent": "Mozilla/5.0 (compatible; DummDummBrandOS/1.0)" },
+    });
+    await response.body?.cancel();
+    if (response.status >= 300 && response.status < 400) return false;
+    if (response.status === 200) return true;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Duration alone is unreliable (short regular clips exist, and Shorts run up to
+// 3 min). Resolve confidently where possible, and only URL-verify the ambiguous
+// 60–180s band.
+async function classifyFormat(video: YouTubeVideoResource): Promise<"shorts" | "longform"> {
   const durationSeconds = parseIsoDurationSeconds(video.contentDetails?.duration);
   const title = video.snippet?.title ?? "";
-  return durationSeconds <= 180 || /#shorts|shorts|쇼츠/i.test(title) ? "shorts" : "longform";
+  if (durationSeconds > 180) return "longform";
+  if (durationSeconds > 0 && durationSeconds <= 60) return "shorts";
+  if (/#shorts/i.test(title)) return "shorts";
+  const verified = await shortsUrlIs200(video.id);
+  if (verified !== null) return verified ? "shorts" : "longform";
+  return "longform";
+}
+
+async function classifyVideos(videos: YouTubeVideoResource[]): Promise<Map<string, "shorts" | "longform">> {
+  const result = new Map<string, "shorts" | "longform">();
+  for (const video of videos) {
+    result.set(video.id, await classifyFormat(video));
+  }
+  return result;
 }
 
 async function upsertChannelAccount(
@@ -400,6 +434,7 @@ Deno.serve(async (req) => {
       : [];
     const videoIds = Array.from(new Set([...analyticsVideoIds, ...uploadVideoIds])).slice(0, maxVideos);
     const videos = await fetchVideos(accessToken, videoIds);
+    const formatByVideoId = await classifyVideos(videos);
     const analyticsByVideo = new Map(videoAnalyticsRows.map((row) => [String(row.video ?? ""), row]));
 
     const { data: posts, error: postsError } = videos.length
@@ -407,7 +442,7 @@ Deno.serve(async (req) => {
           .from("published_posts")
           .upsert(
             videos.map((video) => {
-              const format = classifyFormat(video);
+              const format = formatByVideoId.get(video.id) ?? "longform";
               const permalink =
                 format === "shorts"
                   ? `https://www.youtube.com/shorts/${video.id}`
@@ -518,7 +553,7 @@ Deno.serve(async (req) => {
             likes: numeric(video.statistics?.likeCount),
             comments: numeric(video.statistics?.commentCount),
             duration_seconds: durationSeconds,
-            format: classifyFormat(video),
+            format: formatByVideoId.get(video.id) ?? "longform",
           },
           status: analytics ? "complete" : "partial",
           source_ids: [syncRunId],

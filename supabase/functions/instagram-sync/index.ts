@@ -1,22 +1,29 @@
 // Supabase Edge Function: instagram-sync
-// Pulls Instagram account, media metadata, and insights into Postgres.
+// Instagram API with Instagram Login (graph.instagram.com).
+// Tokens are stored per account in the channel_tokens table and auto-refreshed
+// on every run, so they never need manual rotation. Pulls account + media
+// insights into Postgres.
 //
-// Required secrets:
-//   META_ACCESS_TOKEN
+// Setup (once):
+//   1) Generate an Instagram User token per account in the Graph API Explorer
+//      ("Generate Instagram Access Token").
+//   2) Save each into channel_tokens (see migration 0006 / setup SQL).
 //
 // Optional secrets:
-//   META_GRAPH_VERSION=v25.0
-//   INSTAGRAM_ACCOUNT_COMPANY_ID
-//   INSTAGRAM_ACCOUNT_DUMMDUMM_LOG_ID
-//   INSTAGRAM_ACCOUNTS=[{"accountKey":"company","instagramUserId":"...","displayName":"..."}]
+//   INSTAGRAM_GRAPH_VERSION=v21.0
 //   MARKETING_OWNER_EMAILS
+//   CRON_SECRET  (allows scheduled runs without a user login; sent as x-cron-secret)
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
-const GRAPH_VERSION = Deno.env.get("META_GRAPH_VERSION") ?? "v25.0";
-const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_VERSION}`;
+const GRAPH_VERSION = Deno.env.get("INSTAGRAM_GRAPH_VERSION") ?? Deno.env.get("META_GRAPH_VERSION") ?? "v21.0";
+const GRAPH_BASE = `https://graph.instagram.com/${GRAPH_VERSION}`;
+const REFRESH_URL = "https://graph.instagram.com/refresh_access_token";
+// Refresh when the token expires within this many days (Instagram tokens must be
+// at least 24h old to refresh; a too-fresh refresh error is caught and ignored).
+const REFRESH_WITHIN_DAYS = 20;
 const ACCOUNT_METRICS = [
   "reach",
   "views",
@@ -30,7 +37,7 @@ const ACCOUNT_METRICS = [
   "total_interactions",
 ];
 const MEDIA_METRICS = ["reach", "views", "likes", "comments", "shares", "saved", "total_interactions"];
-const INSTAGRAM_SCOPES = ["instagram_basic", "instagram_manage_insights", "pages_show_list"];
+const INSTAGRAM_SCOPES = ["instagram_business_basic", "instagram_business_manage_insights"];
 
 type PeriodMode = "weekly" | "monthly";
 
@@ -43,27 +50,17 @@ type SyncRequest = {
 };
 
 type InstagramAccountConfig = {
+  tokenRowId: string;
   accountKey: string;
-  instagramUserId: string;
+  instagramUserId: string; // resolved from /me; "me" until resolved
   displayName?: string;
-  accessToken?: string;
-};
-
-type PageAccountsResponse = {
-  data?: Array<{
-    name?: string;
-    access_token?: string;
-    instagram_business_account?: {
-      id?: string;
-      username?: string;
-      name?: string;
-    };
-  }>;
-  paging?: { next?: string };
+  accessToken: string;
+  tokenExpiresAt: string | null;
 };
 
 type InstagramProfile = {
   id: string;
+  user_id?: string;
   username?: string;
   name?: string;
   followers_count?: number;
@@ -281,68 +278,81 @@ async function fetchMediaInsights(mediaId: string, accessToken: string) {
   }
 }
 
-function parseConfiguredAccounts(): InstagramAccountConfig[] {
-  const rawJson = Deno.env.get("INSTAGRAM_ACCOUNTS");
-  if (rawJson) {
-    const parsed = JSON.parse(rawJson);
-    if (!Array.isArray(parsed)) throw new Error("INSTAGRAM_ACCOUNTS must be a JSON array");
-    return parsed
-      .map((item, index) => ({
-        accountKey: String(item.accountKey ?? item.account_key ?? (index === 0 ? "company" : "dummdumm-log")),
-        instagramUserId: String(item.instagramUserId ?? item.instagram_user_id ?? item.id ?? ""),
-        displayName: item.displayName ?? item.display_name,
-        accessToken: item.accessToken ?? item.access_token,
-      }))
-      .filter((item) => item.instagramUserId);
+type ChannelTokenRow = {
+  id: string;
+  account_key: string;
+  access_token: string;
+  token_expires_at: string | null;
+  external_user_id: string | null;
+  display_name: string | null;
+};
+
+async function loadInstagramTokens(
+  supabase: ReturnType<typeof createClient>,
+): Promise<InstagramAccountConfig[]> {
+  const { data, error } = await supabase
+    .from("channel_tokens")
+    .select("id, account_key, access_token, token_expires_at, external_user_id, display_name")
+    .eq("org_id", ORG_ID)
+    .eq("provider", "instagram")
+    .order("account_key", { ascending: true });
+  if (error) throw error;
+
+  const rows = (data ?? []) as ChannelTokenRow[];
+  if (!rows.length) {
+    throw new Error(
+      "저장된 Instagram 토큰이 없습니다. channel_tokens에 계정별 Instagram 토큰을 넣어주세요 (provider='instagram').",
+    );
   }
 
-  const accounts: InstagramAccountConfig[] = [];
-  const companyId = Deno.env.get("INSTAGRAM_ACCOUNT_COMPANY_ID");
-  const logId = Deno.env.get("INSTAGRAM_ACCOUNT_DUMMDUMM_LOG_ID");
-  if (companyId) accounts.push({ accountKey: "company", instagramUserId: companyId, displayName: "Instagram 본계" });
-  if (logId) accounts.push({ accountKey: "dummdumm-log", instagramUserId: logId, displayName: "Instagram 둠둠로그" });
-  return accounts;
+  return rows.map((row) => ({
+    tokenRowId: row.id,
+    accountKey: row.account_key,
+    instagramUserId: row.external_user_id ?? "me",
+    displayName: row.display_name ?? undefined,
+    accessToken: row.access_token,
+    tokenExpiresAt: row.token_expires_at,
+  }));
 }
 
-async function discoverAccounts(accessToken: string): Promise<InstagramAccountConfig[]> {
-  const accounts: InstagramAccountConfig[] = [];
-  let nextUrl = buildGraphUrl(
-    "me/accounts",
-    { fields: "name,access_token,instagram_business_account{id,username,name}", limit: 50 },
-    accessToken,
-  );
+// Exchange a long-lived Instagram token for a fresh one (adds ~60 days). Only
+// runs when the token is close to expiry; a "too fresh to refresh" error is
+// swallowed so the sync keeps using the current token.
+async function refreshInstagramTokenIfNeeded(
+  supabase: ReturnType<typeof createClient>,
+  account: InstagramAccountConfig,
+): Promise<{ accessToken: string; warning?: string }> {
+  const expiresAt = account.tokenExpiresAt ? new Date(account.tokenExpiresAt).getTime() : 0;
+  const soon = Date.now() + REFRESH_WITHIN_DAYS * 86400 * 1000;
+  if (expiresAt && expiresAt > soon) return { accessToken: account.accessToken };
 
-  while (nextUrl && accounts.length < 2) {
-    const response = await graphGet<PageAccountsResponse>(nextUrl, accessToken);
-    for (const page of response.data ?? []) {
-      const ig = page.instagram_business_account;
-      if (!ig?.id) continue;
-      const index = accounts.length;
-      accounts.push({
-        accountKey: index === 0 ? "company" : "dummdumm-log",
-        instagramUserId: ig.id,
-        displayName: ig.username ? `Instagram @${ig.username}` : ig.name ?? page.name ?? `Instagram ${index + 1}`,
-        accessToken: page.access_token ?? accessToken,
-      });
-      if (accounts.length >= 2) break;
+  try {
+    const url = new URL(REFRESH_URL);
+    url.searchParams.set("grant_type", "ig_refresh_token");
+    url.searchParams.set("access_token", account.accessToken);
+    const response = await fetch(url.toString());
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!response.ok || !data.access_token) {
+      const message = data?.error?.message ?? response.statusText;
+      return { accessToken: account.accessToken, warning: `token refresh skipped: ${message}` };
     }
-    nextUrl = response.paging?.next ?? "";
-  }
 
-  return accounts;
-}
-
-async function getInstagramAccounts(accessToken: string) {
-  const configured = parseConfiguredAccounts();
-  if (configured.length) {
-    return configured.map((account) => ({ ...account, accessToken: account.accessToken ?? accessToken }));
+    const newExpiry = new Date(Date.now() + Number(data.expires_in ?? 5184000) * 1000).toISOString();
+    await supabase
+      .from("channel_tokens")
+      .update({
+        access_token: data.access_token,
+        token_expires_at: newExpiry,
+        last_refreshed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", account.tokenRowId);
+    return { accessToken: data.access_token };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    return { accessToken: account.accessToken, warning: `token refresh error: ${message}` };
   }
-
-  const discovered = await discoverAccounts(accessToken);
-  if (!discovered.length) {
-    throw new Error("No Instagram business accounts found. Set INSTAGRAM_ACCOUNT_COMPANY_ID and INSTAGRAM_ACCOUNT_DUMMDUMM_LOG_ID if discovery is not available.");
-  }
-  return discovered;
 }
 
 function classifyFormat(media: InstagramMedia) {
@@ -430,17 +440,22 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
   if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405);
 
-  const authHeader = req.headers.get("Authorization");
-  if (!authHeader) return jsonResponse({ error: "Missing Authorization header" }, 401);
-
   const supabaseUrl = requireEnv("SUPABASE_URL");
   const serviceKey = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
   const supabase = createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } });
 
-  try {
-    await verifyMarketingUser(authHeader, supabase);
-  } catch (error) {
-    return jsonResponse({ error: error instanceof Error ? error.message : "Unauthorized" }, 403);
+  // Scheduled (cron) runs authenticate with a shared secret; interactive runs
+  // require a logged-in marketing user.
+  const cronSecret = Deno.env.get("CRON_SECRET");
+  const isCron = Boolean(cronSecret) && req.headers.get("x-cron-secret") === cronSecret;
+  if (!isCron) {
+    const authHeader = req.headers.get("Authorization");
+    if (!authHeader) return jsonResponse({ error: "Missing Authorization header" }, 401);
+    try {
+      await verifyMarketingUser(authHeader, supabase);
+    } catch (error) {
+      return jsonResponse({ error: error instanceof Error ? error.message : "Unauthorized" }, 403);
+    }
   }
 
   let payload: SyncRequest = {};
@@ -451,24 +466,36 @@ Deno.serve(async (req) => {
   }
 
   const { periodMode, startDate, endDate, maxMedia, includeMediaBackfill } = parseRequestRange(payload);
-  const masterToken = requireEnv("META_ACCESS_TOKEN");
-  const accountConfigs = await getInstagramAccounts(masterToken);
+  const accountConfigs = await loadInstagramTokens(supabase);
   const results = [];
   const syncRunIds: string[] = [];
   let totalRowsRead = 0;
   let totalRowsWritten = 0;
 
   for (const accountConfig of accountConfigs) {
-    const accessToken = accountConfig.accessToken ?? masterToken;
     let syncRunId = "";
     let accountId = "";
     const warnings: string[] = [];
 
     try {
-      const profile = await graphGet<InstagramProfile>(accountConfig.instagramUserId, accessToken, {
-        fields: "id,username,name,followers_count,media_count",
+      const refreshed = await refreshInstagramTokenIfNeeded(supabase, accountConfig);
+      const accessToken = refreshed.accessToken;
+      accountConfig.accessToken = accessToken;
+      if (refreshed.warning) warnings.push(refreshed.warning);
+
+      const profile = await graphGet<InstagramProfile>("me", accessToken, {
+        fields: "user_id,username,name,followers_count,media_count",
       });
-      const accountInsights = await fetchAccountInsights(accountConfig.instagramUserId, accessToken, startDate, endDate);
+      const resolvedUserId = profile.user_id ?? profile.id;
+      accountConfig.instagramUserId = resolvedUserId;
+      if (resolvedUserId && resolvedUserId !== "me") {
+        await supabase
+          .from("channel_tokens")
+          .update({ external_user_id: resolvedUserId, updated_at: new Date().toISOString() })
+          .eq("id", accountConfig.tokenRowId);
+      }
+
+      const accountInsights = await fetchAccountInsights(resolvedUserId, accessToken, startDate, endDate);
       warnings.push(...accountInsights.warnings);
 
       const channelAccount = await upsertChannelAccount(
