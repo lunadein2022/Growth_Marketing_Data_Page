@@ -94,14 +94,12 @@ function buildKpis(metrics: Record<string, unknown> | null, status: DataStatus):
   const sessions = numberFrom(metrics?.sessions);
   const engagement = numberFrom(metrics?.engagement_rate);
   const searchClicks = numberFrom(metrics?.search_clicks);
-  const conversions = numberFrom(metrics?.conversions);
 
   return [
     metric("사용자", users ? formatCount(users) : "N/A", status),
     metric("세션", sessions ? formatCount(sessions) : "N/A", status),
     metric("참여율", formatPercent(engagement), engagement ? status : "partial"),
     metric("검색 클릭", searchClicks ? formatCount(searchClicks) : "N/A", searchClicks ? status : "partial"),
-    metric("전환(문의)", conversions ? formatCount(conversions) : "N/A", conversions ? status : "partial"),
   ];
 }
 
@@ -249,10 +247,6 @@ export async function loadWebsiteChannelPatch(periodMode: PeriodMode): Promise<P
       const clicks = sumMetric(latestSnapshots, "search_clicks");
       return clicks ? formatCount(clicks) : "N/A";
     })(), sumMetric(latestSnapshots, "search_clicks") ? status : "partial"),
-    metric("전환(문의)", (() => {
-      const conversions = sumMetric(latestSnapshots, "conversions");
-      return conversions ? formatCount(conversions) : "N/A";
-    })(), sumMetric(latestSnapshots, "conversions") ? status : "partial"),
   ];
 
   const accountKpis = Object.fromEntries(

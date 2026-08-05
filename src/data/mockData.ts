@@ -289,7 +289,6 @@ export const channels: ChannelView[] = [
       { label: "세션", value: "N/A", delta: "동기화 대기", status: "not_uploaded" },
       { label: "참여율", value: "N/A", delta: "동기화 대기", status: "not_uploaded" },
       { label: "검색 클릭", value: "N/A", delta: "동기화 대기", status: "not_uploaded" },
-      { label: "전환(문의)", value: "N/A", delta: "동기화 대기", status: "not_uploaded" },
     ],
     trend: [],
     topContent: [],

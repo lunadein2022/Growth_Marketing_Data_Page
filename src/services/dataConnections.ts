@@ -51,7 +51,7 @@ export const API_CONNECTION_REQUIREMENTS: ApiConnectionRequirement[] = [
     provider: "google",
     label: "GA4 + Search Console",
     accounts: ["Website KR", "Website EN"],
-    metrics: ["사용자", "세션", "검색어", "클릭", "노출", "문의"],
+    metrics: ["사용자", "세션", "검색어", "클릭", "노출"],
     scopes: [
       "https://www.googleapis.com/auth/analytics.readonly",
       "https://www.googleapis.com/auth/webmasters.readonly",

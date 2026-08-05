@@ -296,6 +296,25 @@ async function syncAccount(
     warnings.push(`GA4 pages: ${error instanceof Error ? error.message : "failed"}`);
   }
 
+  // GA4 can return the same pagePath under several pageTitles (query params,
+  // renamed pages, ...). Collapse to one row per path — summing metrics — so the
+  // published_posts / snapshot upserts (keyed by pagePath) have no duplicate
+  // rows in a single batch (which Postgres rejects with "ON CONFLICT ... cannot
+  // affect row a second time").
+  const pageByPath = new Map<string, { dims: string[]; metrics: Record<string, number> }>();
+  for (const row of pageRows) {
+    const path = row.dims[0] ?? "/";
+    const existing = pageByPath.get(path);
+    if (existing) {
+      existing.metrics.screenPageViews = numeric(existing.metrics.screenPageViews) + numeric(row.metrics.screenPageViews);
+      existing.metrics.sessions = numeric(existing.metrics.sessions) + numeric(row.metrics.sessions);
+      existing.metrics.activeUsers = numeric(existing.metrics.activeUsers) + numeric(row.metrics.activeUsers);
+    } else {
+      pageByPath.set(path, { dims: [path, row.dims[1] ?? path], metrics: { ...row.metrics } });
+    }
+  }
+  pageRows = Array.from(pageByPath.values());
+
   // Search Console totals + daily + top queries (optional).
   let searchTotals = { clicks: 0, impressions: 0, ctr: 0, position: 0 };
   let searchDaily: SearchRow[] = [];
@@ -582,7 +601,14 @@ Deno.serve(async (req) => {
       accounts,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Website sync failed";
+    // Supabase/PostgREST errors are plain objects with a `message` field, not
+    // Error instances — surface their message instead of a generic fallback.
+    const message =
+      error instanceof Error
+        ? error.message
+        : error && typeof error === "object" && "message" in error
+          ? String((error as { message: unknown }).message)
+          : "Website sync failed";
     return jsonResponse({ status: "error", error: message }, 500);
   }
 });
