@@ -202,14 +202,36 @@ function num(metrics: Record<string, unknown> | null, key: string): number {
   return Number.isFinite(value) ? value : 0;
 }
 
-function buildTrend(rows: SeriesRow[], metricKey: string): TrendPoint[] {
+function collectSeries(rows: SeriesRow[], metricKey: string): Array<{ date: string; value: number }> {
   return rows
     .filter((row) => row.metric_key === metricKey && row.value !== null)
     .sort((a, b) => a.point_date.localeCompare(b.point_date))
-    .map((row) => ({ label: shortDate(row.point_date), value: Math.round(Number(row.value ?? 0)) }));
+    .map((row) => ({ date: row.point_date, value: Math.round(Number(row.value ?? 0)) }));
 }
 
-export async function loadLinkedinChannelPatch(_periodMode: PeriodMode): Promise<Partial<ChannelView> | null> {
+// LinkedIn files carry ~a year of daily points, far too many to chart raw.
+// Weekly view → recent 7 days (daily); monthly view → aggregate by calendar
+// month (recent 12).
+function buildTrend(rows: SeriesRow[], metricKey: string, periodMode: PeriodMode): TrendPoint[] {
+  const points = collectSeries(rows, metricKey);
+  if (!points.length) return [];
+
+  if (periodMode === "weekly") {
+    return points.slice(-7).map((point) => ({ label: shortDate(point.date), value: point.value }));
+  }
+
+  const byMonth = new Map<string, number>();
+  for (const point of points) {
+    const key = point.date.slice(0, 7); // YYYY-MM
+    byMonth.set(key, (byMonth.get(key) ?? 0) + point.value);
+  }
+  return Array.from(byMonth.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(-12)
+    .map(([ym, value]) => ({ label: `${Number(ym.slice(5, 7))}월`, value }));
+}
+
+export async function loadLinkedinChannelPatch(periodMode: PeriodMode): Promise<Partial<ChannelView> | null> {
   if (!hasSupabaseConfig()) return null;
   const supabase = getSupabaseClient();
   const accountId = await resolveLinkedinAccountId(supabase);
@@ -259,13 +281,13 @@ export async function loadLinkedinChannelPatch(_periodMode: PeriodMode): Promise
   ];
 
   const seriesRows = (series ?? []) as SeriesRow[];
-  const impressionTrend = buildTrend(seriesRows, "impressions");
+  const impressionTrend = buildTrend(seriesRows, "impressions", periodMode);
   const trendSeries = Object.fromEntries(
     [
       ["노출", impressionTrend],
-      ["클릭", buildTrend(seriesRows, "clicks")],
-      ["신규 팔로워", buildTrend(seriesRows, "new_followers")],
-      ["방문자", buildTrend(seriesRows, "page_views")],
+      ["클릭", buildTrend(seriesRows, "clicks", periodMode)],
+      ["신규 팔로워", buildTrend(seriesRows, "new_followers", periodMode)],
+      ["방문자", buildTrend(seriesRows, "page_views", periodMode)],
     ].filter(([, points]) => (points as TrendPoint[]).length > 0),
   ) as ChannelView["trendSeries"];
 
@@ -283,6 +305,7 @@ export async function loadLinkedinChannelPatch(_periodMode: PeriodMode): Promise
         status: "파일 성과 연결",
         campaign: "LinkedIn 업로드",
         publishDate: shortDate(row.published_at),
+        publishedAt: row.published_at.slice(0, 10),
         metricLabel: "노출",
         metricValue: formatCount(impressions),
         performanceSource: `${snapshot.period_start}~${snapshot.period_end}`,

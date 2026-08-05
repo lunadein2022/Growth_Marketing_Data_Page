@@ -2336,7 +2336,7 @@ h3 {
   padding: 11px 0;
   border-top: 1px solid #e7edf5;
   display: grid;
-  grid-template-columns: minmax(200px, 1.3fr) 116px minmax(244px, 1.5fr) 118px;
+  grid-template-columns: minmax(200px, 1.3fr) 116px minmax(244px, 1.5fr) 156px;
   align-items: center;
   gap: 14px;
 }
@@ -2410,7 +2410,8 @@ select {
 }
 
 .time-input {
-  min-width: 108px;
+  width: 100%;
+  min-width: 0;
   min-height: 34px;
   padding: 0 10px;
   border: 1px solid var(--line-strong);
@@ -2419,6 +2420,7 @@ select {
   color: var(--text);
   font-weight: 900;
   font-variant-numeric: tabular-nums;
+  box-sizing: border-box;
 }
 
 .time-input:hover {

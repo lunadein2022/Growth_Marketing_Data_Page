@@ -1,6 +1,6 @@
 import { getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
 import { channelMeta } from "../data/mockData";
-import type { ChannelId, DataStatus, PeriodComparison, PeriodComparisonRow } from "./adapters/types";
+import type { ChannelId, ChannelMetric, DataStatus, PeriodComparison, PeriodComparisonRow, TrendPoint } from "./adapters/types";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -186,4 +186,148 @@ function pickPrimaryMetric(rows: SeriesRow[]): string | null {
 
 function channelLabel(channel: string): string {
   return channelMeta[channel as Exclude<ChannelId, "all">]?.label ?? channel;
+}
+
+// ---------------------------------------------------------------------------
+// Channel-scoped period view: current-range KPIs (with % change vs the past
+// range) + a current-range trend, all from metric_time_series. Powers the
+// inline "과거 vs 현재" period picker in the channel view.
+// ---------------------------------------------------------------------------
+type ChannelMetricConfig = { key: string; label: string; agg: "sum" | "avg"; format: "count" | "percent" | "duration"; primary?: boolean };
+
+const CHANNEL_METRICS: Record<string, ChannelMetricConfig[]> = {
+  youtube: [
+    { key: "views", label: "조회수", agg: "sum", format: "count", primary: true },
+    { key: "watch_time_minutes", label: "시청시간(분)", agg: "sum", format: "count" },
+    { key: "average_view_seconds", label: "평균 시청(초)", agg: "avg", format: "count" },
+    { key: "subscribers_gained", label: "신규 구독", agg: "sum", format: "count" },
+  ],
+  instagram: [
+    { key: "reach", label: "도달", agg: "sum", format: "count", primary: true },
+    { key: "views", label: "조회", agg: "sum", format: "count" },
+    { key: "saves", label: "저장", agg: "sum", format: "count" },
+    { key: "shares", label: "공유", agg: "sum", format: "count" },
+    { key: "followers_gained", label: "신규 팔로워", agg: "sum", format: "count" },
+  ],
+  linkedin: [
+    { key: "impressions", label: "노출", agg: "sum", format: "count", primary: true },
+    { key: "clicks", label: "클릭", agg: "sum", format: "count" },
+    { key: "new_followers", label: "신규 팔로워", agg: "sum", format: "count" },
+    { key: "page_views", label: "페이지뷰", agg: "sum", format: "count" },
+  ],
+  website: [
+    { key: "users", label: "사용자", agg: "sum", format: "count", primary: true },
+    { key: "sessions", label: "세션", agg: "sum", format: "count" },
+    { key: "page_views", label: "페이지뷰", agg: "sum", format: "count" },
+    { key: "search_clicks", label: "검색 클릭", agg: "sum", format: "count" },
+  ],
+  naver: [
+    { key: "views", label: "조회수", agg: "sum", format: "count", primary: true },
+    { key: "uniqueVisitors", label: "순방문자수", agg: "sum", format: "count" },
+    { key: "visits", label: "방문 횟수", agg: "sum", format: "count" },
+    { key: "revisitRate", label: "재방문율", agg: "avg", format: "percent" },
+    { key: "avgDurationSeconds", label: "평균 사용 시간", agg: "avg", format: "duration" },
+  ],
+};
+
+export type ChannelPeriodView = {
+  kpis: ChannelMetric[];
+  trend: TrendPoint[];
+  currentLabel: string;
+  baseline: string;
+  dataNote: string;
+  hasData: boolean;
+};
+
+function shortLabel(date: string): string {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return date.slice(5);
+  return `${parsed.getUTCMonth() + 1}/${parsed.getUTCDate()}`;
+}
+
+// Daily points → chart-friendly series. Long ranges (>31 days) aggregate to
+// monthly buckets so the sparkline stays readable.
+function windowTrendPoints(dailyPoints: Array<[string, number]>): TrendPoint[] {
+  if (dailyPoints.length <= 31) {
+    return dailyPoints.map(([date, value]) => ({ label: shortLabel(date), value: Math.round(value) }));
+  }
+  const byMonth = new Map<string, number>();
+  for (const [date, value] of dailyPoints) {
+    const key = date.slice(0, 7);
+    byMonth.set(key, (byMonth.get(key) ?? 0) + value);
+  }
+  return Array.from(byMonth.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([ym, value]) => ({ label: `${Number(ym.slice(5, 7))}월`, value: Math.round(value) }));
+}
+
+export async function computeChannelPeriodView(
+  channelId: Exclude<ChannelId, "all">,
+  current: DateRange,
+  previous: DateRange,
+  accountKey?: string | null,
+): Promise<ChannelPeriodView> {
+  const supabase = getSupabaseClient();
+  const configs = CHANNEL_METRICS[channelId] ?? [];
+  const currentLabel = `${current.start} ~ ${current.end}`;
+  const baseline = `${previous.start} ~ ${previous.end}`;
+  const dataNote = `선택 기간(${currentLabel}) 실데이터 기준입니다. 증감(%)은 과거(${baseline}) 대비입니다.`;
+  const emptyKpis: ChannelMetric[] = configs.map((config) => ({
+    label: config.label,
+    value: "데이터 없음",
+    delta: "N/A",
+    status: "not_uploaded",
+  }));
+
+  let accountsQuery = supabase
+    .from("channel_accounts")
+    .select("id")
+    .eq("org_id", ORG_ID)
+    .eq("channel", channelId);
+  if (accountKey) accountsQuery = accountsQuery.eq("account_key", accountKey);
+  const { data: accounts, error: accountsError } = await accountsQuery;
+  if (accountsError) throw new Error(accountsError.message);
+  const accountIds = (accounts ?? []).map((account: { id: string }) => account.id);
+
+  if (!accountIds.length || !configs.length) {
+    return { kpis: emptyKpis, trend: [], currentLabel, baseline, dataNote, hasData: false };
+  }
+
+  const lo = [previous.start, current.start].sort()[0];
+  const hi = [previous.end, current.end].sort().reverse()[0];
+  const { data: series, error: seriesError } = await supabase
+    .from("metric_time_series")
+    .select("owner_id, channel, metric_key, point_date, value")
+    .eq("org_id", ORG_ID)
+    .eq("owner_type", "channel")
+    .eq("channel", channelId)
+    .in("owner_id", accountIds)
+    .gte("point_date", lo)
+    .lte("point_date", hi);
+  if (seriesError) throw new Error(seriesError.message);
+  const rows = (series ?? []) as SeriesRow[];
+
+  const kpis: ChannelMetric[] = configs.map((config) => {
+    const cur = aggregate(valuesIn(rows, config.key, current), config.agg);
+    const prev = aggregate(valuesIn(rows, config.key, previous), config.agg);
+    return {
+      label: config.label,
+      value: formatValue(cur, config.format),
+      delta: growthOf(prev, cur),
+      status: statusOf(prev, cur),
+    };
+  });
+
+  // Current-range trend for the primary metric (summed across the channel's accounts).
+  const primary = configs.find((config) => config.primary) ?? configs[0];
+  const byDate = new Map<string, number>();
+  for (const row of rows) {
+    if (row.metric_key !== primary.key || row.value === null || !inRange(row.point_date, current)) continue;
+    byDate.set(row.point_date, (byDate.get(row.point_date) ?? 0) + Number(row.value));
+  }
+  const dailyPoints = Array.from(byDate.entries()).sort(([a], [b]) => a.localeCompare(b));
+  const trend = windowTrendPoints(dailyPoints);
+
+  const hasData = kpis.some((kpi) => kpi.value !== "데이터 없음");
+  return { kpis, trend, currentLabel, baseline, dataNote, hasData };
 }

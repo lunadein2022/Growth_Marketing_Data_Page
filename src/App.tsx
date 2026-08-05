@@ -100,6 +100,12 @@ import {
   loadWebsiteChannelPatch,
 } from "./services/websiteChannelData";
 import {
+  canUseContentLabData,
+  deleteAdFromSupabase,
+  listAds,
+  upsertAdToSupabase,
+} from "./services/contentLabData";
+import {
   canSyncWebsiteAnalytics,
   syncWebsiteAnalytics,
   type WebsiteSyncState,
@@ -111,7 +117,8 @@ import {
 } from "./services/commandCenterData";
 import {
   canComparePeriods,
-  computePeriodComparison,
+  computeChannelPeriodView,
+  type ChannelPeriodView,
   type DateRange,
 } from "./services/periodComparison";
 import {
@@ -145,7 +152,6 @@ import type {
   CampaignRow,
   DataCenterSnapshot,
   DataStatus,
-  PeriodComparison,
   PeriodMode,
   PublishingItem,
   TrendPoint,
@@ -280,6 +286,29 @@ function writeStoredRuleTimes(times: Record<string, string>) {
     /* ignore storage errors */
   }
 }
+
+const RULE_DAYS_STORAGE_KEY = "dummdumm.ruleDays";
+
+function readStoredRuleDays(): Record<string, string[]> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(RULE_DAYS_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, string[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredRuleDays(days: Record<string, string[]>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RULE_DAYS_STORAGE_KEY, JSON.stringify(days));
+  } catch {
+    /* ignore storage errors */
+  }
+}
+
+const WEEKDAY_ORDER = ["월", "화", "수", "목", "금", "토", "일"];
 
 function readStoredChannelOrder(): Array<Exclude<ChannelId, "all">> {
   if (typeof window === "undefined") return [];
@@ -1007,6 +1036,7 @@ function App() {
   const [selectedChannel, setSelectedChannel] = useState<Exclude<ChannelId, "all">>("youtube");
   const [selectedContentTab, setSelectedContentTab] = useState<ContentTab>("publishing");
   const [compareOpen, setCompareOpen] = useState(false);
+  const [activePeriod, setActivePeriod] = useState<{ current: DateRange; previous: DateRange } | null>(null);
   const [briefing, setBriefing] = useState<AiBriefing | null>(null);
   const [briefingHistory, setBriefingHistory] = useState<AiBriefing[]>(initialBriefingHistory);
   const [briefingOpen, setBriefingOpen] = useState(false);
@@ -1152,6 +1182,27 @@ function App() {
       mounted = false;
     };
   }, [authUser?.uid, periodMode, channels.length, channelDataSignature]);
+
+  // Real Content Lab ads (Supabase). When signed in, the ads tab reflects the DB
+  // (empty until ads are registered) instead of in-memory mock ads.
+  useEffect(() => {
+    if (!authUser || !canUseContentLabData()) return;
+
+    let mounted = true;
+
+    listAds()
+      .then((ads) => {
+        if (!mounted) return;
+        setContentLab((current) => (current ? { ...current, ads } : current));
+      })
+      .catch((error) => {
+        console.warn("Saved ads could not be loaded.", error);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [authUser?.uid, contentLab ? "ready" : "empty"]);
 
   useEffect(() => {
     if (!authUser || !canLoadCommandCenterData() || !snapshot) return;
@@ -1378,8 +1429,26 @@ function App() {
 
     return replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
   };
-  const handleSaveAd = async (ad: AdContent) => replaceContentLab(await provider.upsertAd(ad, periodMode));
-  const handleDeleteAd = async (adId: string) => replaceContentLab(await provider.deleteAd(adId, periodMode));
+  const handleSaveAd = async (ad: AdContent) => {
+    if (canUseContentLabData() && authUser && contentLab) {
+      await upsertAdToSupabase(ad);
+      const ads = await listAds();
+      const next = { ...contentLab, ads };
+      setContentLab(next);
+      return next;
+    }
+    return replaceContentLab(await provider.upsertAd(ad, periodMode));
+  };
+  const handleDeleteAd = async (adId: string) => {
+    if (canUseContentLabData() && authUser && contentLab) {
+      await deleteAdFromSupabase(adId);
+      const ads = await listAds();
+      const next = { ...contentLab, ads };
+      setContentLab(next);
+      return next;
+    }
+    return replaceContentLab(await provider.deleteAd(adId, periodMode));
+  };
   const handleSignIn = async () => {
     setAuthBusy(true);
 
@@ -1720,9 +1789,9 @@ function App() {
             ]}
             onChange={(value) => setPeriodMode(value as PeriodMode)}
           />
-          <button className="button secondary" onClick={() => setCompareOpen(true)}>
-            <BarChart3 size={16} />
-            기간 비교
+          <button className={activePeriod ? "button dark" : "button secondary"} onClick={() => setCompareOpen(true)}>
+            <CalendarDays size={16} />
+            {activePeriod ? "기간 필터 적용됨" : "기간 선택"}
           </button>
           <button className="button secondary" onClick={() => handleGenerateBriefing("command")}>
             <Bot size={16} />
@@ -1788,7 +1857,7 @@ function App() {
                 channel={selectedChannelView}
                 naverMonthlyReport={naverMonthlyReport}
                 naverMonthlyReports={naverMonthlyReports}
-                onCompare={() => setCompareOpen(true)}
+                activePeriod={activePeriod}
                 onGenerate={() => handleGenerateBriefing("channel", selectedChannel)}
               />
             )}
@@ -1836,7 +1905,20 @@ function App() {
         )}
       </main>
 
-      {compareOpen && <PeriodCompareModal onClose={() => setCompareOpen(false)} />}
+      {compareOpen && (
+        <PeriodPickerModal
+          active={activePeriod}
+          onApply={(period) => {
+            setActivePeriod(period);
+            setCompareOpen(false);
+          }}
+          onClear={() => {
+            setActivePeriod(null);
+            setCompareOpen(false);
+          }}
+          onClose={() => setCompareOpen(false)}
+        />
+      )}
       {briefingOpen && (
         <BriefingModal
           briefing={briefing}
@@ -1888,8 +1970,8 @@ function CommandCenter({
         </div>
         <div className="summary-actions">
           <button className="button secondary" onClick={onCompare}>
-            <BarChart3 size={16} />
-            기간 비교
+            <CalendarDays size={16} />
+            기간 선택
           </button>
           <button className="button dark" onClick={onGenerate}>
             <Bot size={16} />
@@ -2286,6 +2368,18 @@ function getInstagramAccountKeyFromFilter(account: string) {
   return undefined;
 }
 
+// Map the selected account/property tab to a channel_accounts.account_key so the
+// period comparison can scope to that account (null = all accounts of the channel).
+function getPeriodAccountKey(channelId: Exclude<ChannelId, "all">, filters: Record<string, string>): string | null {
+  if (channelId === "instagram") return getInstagramAccountKeyFromFilter(filters["계정"] ?? "전체") ?? null;
+  if (channelId === "website") {
+    const property = filters["속성"] ?? "전체";
+    if (property === "KR") return "kr";
+    if (property === "EN") return "en";
+  }
+  return null;
+}
+
 function getInstagramFormatKeyFromFilter(format: string) {
   if (format.includes("릴")) return "reels";
   if (format.includes("캐")) return "carousel";
@@ -2565,7 +2659,7 @@ function ChannelsView({
   channel,
   naverMonthlyReport,
   naverMonthlyReports,
-  onCompare,
+  activePeriod,
   onGenerate,
 }: {
   channels: ChannelView[];
@@ -2574,10 +2668,11 @@ function ChannelsView({
   channel: ChannelView;
   naverMonthlyReport: NaverMonthlyReport | null;
   naverMonthlyReports: NaverMonthlyReport[];
-  onCompare: () => void;
+  activePeriod: { current: DateRange; previous: DateRange } | null;
   onGenerate: () => void;
 }) {
   const [selectedFilters, setSelectedFilters] = useState<Record<string, string>>({});
+  const [periodView, setPeriodView] = useState<ChannelPeriodView | null>(null);
   const [channelOrder, setChannelOrder] = useState<Array<Exclude<ChannelId, "all">>>(() =>
     readStoredChannelOrder(),
   );
@@ -2614,7 +2709,49 @@ function ChannelsView({
     return channelOrder.map((id) => byId.get(id)).filter((item): item is ChannelView => Boolean(item));
   }, [channelOrder, channels]);
 
-  const filteredChannel = useMemo(() => getFilteredChannelView(channel, selectedFilters), [channel, selectedFilters]);
+  const baseFilteredChannel = useMemo(() => getFilteredChannelView(channel, selectedFilters), [channel, selectedFilters]);
+  const periodAccountKey = getPeriodAccountKey(channel.id, selectedFilters);
+
+  // Global period filter: when a period is active (set in the top-bar picker),
+  // override this channel's KPIs + trend and filter the content list to the
+  // current range, scoped to the selected account tab. Deltas are vs the past range.
+  useEffect(() => {
+    if (!activePeriod || !canComparePeriods()) {
+      setPeriodView(null);
+      return;
+    }
+    let mounted = true;
+    computeChannelPeriodView(channel.id, activePeriod.current, activePeriod.previous, periodAccountKey)
+      .then((view) => {
+        if (mounted) setPeriodView(view);
+      })
+      .catch((error) => {
+        console.warn("Channel period view could not be computed.", error);
+        if (mounted) setPeriodView(null);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [activePeriod, channel.id, periodAccountKey]);
+
+  const filteredChannel = useMemo<ChannelView>(() => {
+    if (activePeriod && periodView) {
+      const topContent = baseFilteredChannel.topContent.filter(
+        (item) => item.publishedAt && item.publishedAt >= activePeriod.current.start && item.publishedAt <= activePeriod.current.end,
+      );
+      return {
+        ...baseFilteredChannel,
+        kpis: periodView.kpis,
+        trend: periodView.trend,
+        trendSeries: undefined,
+        topContent,
+        updatedAt: periodView.currentLabel,
+        dataNote: periodView.dataNote,
+      };
+    }
+    return baseFilteredChannel;
+  }, [baseFilteredChannel, activePeriod, periodView]);
+
   const trendMetrics = useMemo(() => buildChannelTrendMetrics(filteredChannel), [filteredChannel]);
   const channelBriefingWarnings = useMemo(() => getBriefingWarnings([filteredChannel]), [filteredChannel]);
 
@@ -2715,16 +2852,21 @@ function ChannelsView({
               ))}
             </div>
           )}
-          <button className="button secondary" onClick={onCompare}>
-            <BarChart3 size={16} />
-            기간 비교
-          </button>
           <button className="button dark" onClick={onGenerate}>
             <Bot size={16} />
             AI 브리핑 생성
           </button>
         </div>
       </section>
+
+      {activePeriod && (
+        <div className="inline-note period-active-note">
+          <CalendarDays size={16} />
+          {periodView && !periodView.hasData
+            ? `선택 기간(${activePeriod.current.start} ~ ${activePeriod.current.end})에 수집된 실데이터가 없습니다.`
+            : `기간 필터 적용됨 · ${activePeriod.current.start} ~ ${activePeriod.current.end} (과거 대비)`}
+        </div>
+      )}
 
       <BriefingReadinessPanel warnings={channelBriefingWarnings} />
 
@@ -3198,6 +3340,21 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
       return next;
     });
   };
+  const [ruleDays, setRuleDays] = useState<Record<string, string[]>>(() => readStoredRuleDays());
+
+  const daysForRule = (rule: ContentLabSnapshot["publishingRules"][number]) => ruleDays[rule.id] ?? rule.days;
+
+  const toggleRuleDay = (rule: ContentLabSnapshot["publishingRules"][number], day: string) => {
+    setRuleDays((prev) => {
+      const current = prev[rule.id] ?? rule.days;
+      const nextDays = current.includes(day)
+        ? current.filter((value) => value !== day)
+        : [...current, day].sort((a, b) => WEEKDAY_ORDER.indexOf(a) - WEEKDAY_ORDER.indexOf(b));
+      const next = { ...prev, [rule.id]: nextDays };
+      writeStoredRuleDays(next);
+      return next;
+    });
+  };
   const [calendarMode, setCalendarMode] = useState<PublishingCalendarMode>("week");
   const [cursorDate, setCursorDate] = useState(TODAY);
 
@@ -3299,8 +3456,14 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
                 <option>상시</option>
               </select>
               <div className="weekday-row">
-                {["월", "화", "수", "목", "금", "토", "일"].map((day) => (
-                  <button key={day} className={rule.days.includes(day) ? "weekday active" : "weekday"}>
+                {WEEKDAY_ORDER.map((day) => (
+                  <button
+                    key={day}
+                    type="button"
+                    className={daysForRule(rule).includes(day) ? "weekday active" : "weekday"}
+                    aria-pressed={daysForRule(rule).includes(day)}
+                    onClick={() => toggleRuleDay(rule, day)}
+                  >
                     {day}
                   </button>
                 ))}
@@ -4341,6 +4504,7 @@ function AdContentManager({
                   </td>
                   <td>
                     <ChannelBadge channel={ad.channel} />
+                    {ad.accountKey && <span className="source-kind">{adAccountLabel(ad.channel, ad.accountKey)}</span>}
                   </td>
                   <td>
                     <strong>{ad.sourceContent ?? "-"}</strong>
@@ -4390,6 +4554,12 @@ function AdContentManager({
       )}
     </>
   );
+}
+
+function adAccountLabel(channel: Exclude<ChannelId, "all">, accountKey: string): string {
+  if (channel === "instagram") return accountKey === "dummdumm-log" ? "둠둠로그" : accountKey === "company" ? "회사본계" : accountKey;
+  if (channel === "website") return accountKey === "en" ? "영문" : accountKey === "kr" ? "국문" : accountKey;
+  return accountKey;
 }
 
 function getAdNumericValue(value: string) {
@@ -4641,7 +4811,7 @@ function AdContentEditor({
           <span>채널</span>
           <select
             value={form.channel}
-            onChange={(event) => update({ channel: event.target.value as Exclude<ChannelId, "all"> })}
+            onChange={(event) => update({ channel: event.target.value as Exclude<ChannelId, "all">, accountKey: undefined })}
           >
             <option value="youtube">YouTube</option>
             <option value="tiktok">TikTok</option>
@@ -4651,6 +4821,25 @@ function AdContentEditor({
             <option value="website">Website</option>
           </select>
         </label>
+        {(form.channel === "instagram" || form.channel === "website") && (
+          <label className="field">
+            <span>계정</span>
+            <select value={form.accountKey ?? ""} onChange={(event) => update({ accountKey: event.target.value || undefined })}>
+              <option value="">전체 계정</option>
+              {form.channel === "instagram" ? (
+                <>
+                  <option value="company">회사본계</option>
+                  <option value="dummdumm-log">둠둠로그</option>
+                </>
+              ) : (
+                <>
+                  <option value="kr">국문</option>
+                  <option value="en">영문</option>
+                </>
+              )}
+            </select>
+          </label>
+        )}
         <label className="field">
           <span>상태</span>
           <select value={form.status} onChange={(event) => update({ status: event.target.value as AdContent["status"] })}>
@@ -5683,34 +5872,20 @@ function DateRangePicker({
   );
 }
 
-function PeriodCompareModal({ onClose }: { onClose: () => void }) {
+function PeriodPickerModal({
+  active,
+  onApply,
+  onClear,
+  onClose,
+}: {
+  active: { current: DateRange; previous: DateRange } | null;
+  onApply: (period: { current: DateRange; previous: DateRange }) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
   const defaults = useMemo(() => defaultCompareRanges(), []);
-  const [scope, setScope] = useState<ChannelId>("all");
-  const [current, setCurrent] = useState<DateRange>({ start: defaults.curStart, end: defaults.curEnd });
-  const [previous, setPrevious] = useState<DateRange>({ start: defaults.prevStart, end: defaults.prevEnd });
-  const [comparison, setComparison] = useState<PeriodComparison | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const configured = canComparePeriods();
-
-  useEffect(() => {
-    if (!configured) {
-      setComparison(null);
-      return;
-    }
-    let mounted = true;
-    setComparison(null);
-    setError(null);
-    computePeriodComparison(scope, current, previous)
-      .then((result) => {
-        if (mounted) setComparison(result);
-      })
-      .catch((err) => {
-        if (mounted) setError(err instanceof Error ? err.message : "비교 계산 실패");
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [configured, scope, current, previous]);
+  const [current, setCurrent] = useState<DateRange>(active?.current ?? { start: defaults.curStart, end: defaults.curEnd });
+  const [previous, setPrevious] = useState<DateRange>(active?.previous ?? { start: defaults.prevStart, end: defaults.prevEnd });
 
   const fillPreviousFromCurrent = () => {
     const startMs = Date.parse(`${current.start}T00:00:00Z`);
@@ -5723,31 +5898,14 @@ function PeriodCompareModal({ onClose }: { onClose: () => void }) {
     setPrevious({ start: toIsoDate(prevStartMs), end: toIsoDate(prevEndMs) });
   };
 
-  const scopeTabs: Array<{ id: ChannelId; label: string }> = [
-    { id: "all", label: "전체" },
-    { id: "youtube", label: "YouTube" },
-    { id: "instagram", label: "Instagram" },
-    { id: "website", label: "Website" },
-    { id: "linkedin", label: "LinkedIn" },
-    { id: "naver", label: "Naver Blog" },
-    { id: "tiktok", label: "TikTok" },
-  ];
+  const invalidRange = current.end < current.start;
 
   return (
-    <ModalShell title="기간 비교 - 과거 vs 지금" icon={<BarChart3 size={18} />} onClose={onClose} size="large">
+    <ModalShell title="기간 선택 - 과거 vs 현재" icon={<CalendarDays size={18} />} onClose={onClose} size="medium">
       <div className="modal-stack">
-        <div className="scope-tabs">
-          {scopeTabs.map((tab) => (
-            <button
-              key={tab.id}
-              className={scope === tab.id ? "scope-tab active" : "scope-tab"}
-              onClick={() => setScope(tab.id)}
-            >
-              {tab.id !== "all" && <ChannelBadge channel={tab.id as Exclude<ChannelId, "all">} compact />}
-              {tab.label}
-            </button>
-          ))}
-        </div>
+        <p className="modal-intro">
+          <strong>현재 기간</strong>을 기준으로 모든 채널 데이터가 필터링되고, 증감(%)은 <strong>과거 기간</strong> 대비로 표시됩니다.
+        </p>
 
         <div className="compare-range-controls">
           <DateRangePicker label="과거 기간" value={previous} onChange={setPrevious} />
@@ -5758,70 +5916,29 @@ function PeriodCompareModal({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        {!configured ? (
-          <div className="loading-panel slim">Supabase 연결 후 실데이터 기간 비교가 활성화됩니다.</div>
-        ) : error ? (
-          <div className="loading-panel slim">비교 계산 실패: {error}</div>
-        ) : !comparison ? (
-          <div className="loading-panel slim">
-            <Loader2 size={18} className="spin" />
-            비교 계산 중
+        {!canComparePeriods() && (
+          <div className="inline-note">
+            <AlertCircle size={16} />
+            Supabase 연결 + 로그인 후 실데이터 기간 필터가 적용됩니다.
           </div>
-        ) : (
-          <>
-            <div className="comparison-summary">{comparison.summary}</div>
-            {comparison.scope === "all" && (
-              <div className="contribution-grid">
-                {comparison.rows.map((row) => (
-                  <div className="contribution-card" key={row.metric}>
-                    <div className="tile-head">
-                      <strong>{row.metric}</strong>
-                      <StatusPill status={row.status} />
-                    </div>
-                    <span>{row.previous} → {row.current}</span>
-                    <div className={row.growth === "N/A" ? "delta neutral" : "delta up"}>{row.growth}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            <div className="table-scroll">
-              <table className="data-table compare-table">
-                <thead>
-                  <tr>
-                    <th>{comparison.scope === "all" ? "채널" : "지표"}</th>
-                    <th>과거</th>
-                    <th></th>
-                    <th>지금</th>
-                    <th>성장</th>
-                    <th>상태</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {comparison.rows.map((row) => (
-                    <tr key={row.metric}>
-                      <td>
-                        <strong>{row.metric}</strong>
-                      </td>
-                      <td>{row.previous}</td>
-                      <td className="arrow-cell">→</td>
-                      <td>
-                        <strong>{row.current}</strong>
-                      </td>
-                      <td className={row.growth === "N/A" ? "delta neutral" : "delta up"}>{row.growth}</td>
-                      <td>
-                        <StatusPill status={row.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <div className="inline-note">
-              <AlertCircle size={16} />
-              {comparison.dataNote}
-            </div>
-          </>
         )}
+        {invalidRange && (
+          <div className="inline-note">
+            <AlertCircle size={16} />
+            현재 기간의 종료일이 시작일보다 빠릅니다.
+          </div>
+        )}
+
+        <div className="modal-actions">
+          {active && (
+            <button className="button secondary" onClick={onClear}>
+              필터 해제
+            </button>
+          )}
+          <button className="button dark" disabled={invalidRange} onClick={() => onApply({ current, previous })}>
+            확인
+          </button>
+        </div>
       </div>
     </ModalShell>
   );

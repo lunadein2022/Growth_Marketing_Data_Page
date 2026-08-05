@@ -121,6 +121,7 @@ function buildContentItem(post: PublishedPostRow, snapshot?: MetricSnapshotRow):
     status: snapshot ? "기간 성과 연결" : "게시물 메타데이터 저장",
     campaign: snapshot ? "Instagram Graph API" : "Instagram Media API",
     publishDate: formatShortDate(post.published_at),
+    publishedAt: post.published_at.slice(0, 10),
     metricLabel: snapshot ? primaryLabel : "누적 지표",
     metricValue: primaryMetric ? formatCount(primaryMetric) : "N/A",
     performanceSource: snapshot ? `${snapshot.period_start}~${snapshot.period_end}` : "최근 업로드 백필",

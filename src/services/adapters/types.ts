@@ -61,6 +61,7 @@ export interface ContentItem {
   campaignId?: string;
   campaign?: string;
   publishDate: string;
+  publishedAt?: string; // ISO date (YYYY-MM-DD) for period-range filtering
   metricLabel: string;
   metricValue: string;
   draft?: string;
@@ -122,6 +123,7 @@ export interface AdContent {
   id: string;
   title: string;
   channel: Exclude<ChannelId, "all">;
+  accountKey?: string;
   campaignId?: string;
   campaign: string;
   sourceContentId?: string;

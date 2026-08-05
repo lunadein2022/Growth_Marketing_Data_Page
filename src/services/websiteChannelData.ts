@@ -120,6 +120,7 @@ function buildContentItem(post: PublishedPostRow, snapshot?: MetricSnapshotRow):
     status: "GA4 성과 연결",
     campaign: "GA4 랜딩 페이지",
     publishDate: formatShortDate(post.published_at),
+    publishedAt: post.published_at.slice(0, 10),
     metricLabel: "페이지뷰",
     metricValue: pageViews ? formatCount(pageViews) : "N/A",
     performanceSource: snapshot ? `${snapshot.period_start}~${snapshot.period_end}` : "GA4",

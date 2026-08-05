@@ -136,6 +136,7 @@ function buildContentItem(post: PublishedPostRow, snapshot?: MetricSnapshotRow):
     status: hasPeriodMetrics ? "기간 성과 연결" : "영상 메타데이터 저장",
     campaign: hasPeriodMetrics ? "YouTube Analytics" : "YouTube Data API",
     publishDate: formatShortDate(post.published_at),
+    publishedAt: post.published_at.slice(0, 10),
     metricLabel: hasPeriodMetrics ? "기간 조회" : "누적 조회",
     metricValue: formatCount(performance.views),
     performanceSource: snapshot ? `${snapshot.period_start}~${snapshot.period_end}` : "최근 업로드 백필",
