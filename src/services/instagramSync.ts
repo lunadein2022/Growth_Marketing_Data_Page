@@ -1,5 +1,5 @@
 import type { PeriodMode } from "./adapters/types";
-import { getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
+import { ensureFreshSession, getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
 
 export type InstagramSyncRequest = {
   periodMode: PeriodMode;
@@ -46,6 +46,7 @@ export async function syncInstagramAnalytics(request: InstagramSyncRequest): Pro
     throw new Error("Supabase config is missing. Check VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.");
   }
 
+  await ensureFreshSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.functions.invoke("instagram-sync", {
     body: request,

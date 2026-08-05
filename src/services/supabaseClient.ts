@@ -33,6 +33,23 @@ export function getSupabaseClient() {
   return client;
 }
 
+// Ensure the stored access token is valid before a privileged call (e.g. an
+// Edge Function invoke with verify_jwt). The background auto-refresh timer can
+// be throttled while the tab is idle, so an expired token may still be attached
+// — refresh proactively when it is within 2 minutes of expiry (or already gone).
+export async function ensureFreshSession() {
+  if (!hasSupabaseConfig()) return;
+  const supabase = getSupabaseClient();
+  const { data } = await supabase.auth.getSession();
+  const session = data.session;
+  if (!session) return;
+
+  const expiresAtMs = session.expires_at ? session.expires_at * 1000 : 0;
+  if (!expiresAtMs || expiresAtMs - Date.now() < 120_000) {
+    await supabase.auth.refreshSession();
+  }
+}
+
 export function toDashboardUser(user: User | null): SupabaseDashboardUser | null {
   if (!user) return null;
 

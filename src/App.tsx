@@ -2426,72 +2426,44 @@ function getFilteredChannelView(channel: ChannelView, filters: Record<string, st
     case "website": {
       const property = pickFilter(filters["속성"], ["전체", "KR", "EN"] as const, "전체");
       const analysis = pickFilter(filters["분석"], ["전체", "검색"] as const, "전체");
-      const propertyScale = property === "KR" ? 0.72 : property === "EN" ? 0.28 : 1;
       const label = [property, analysis].filter((value) => value !== "전체").join(" · ") || "전체";
-      let content = channel.topContent;
+      const hasRealWebsiteDataset = channel.topContent.some((item) => item.performance);
 
-      if (property === "KR") {
-        content = content.filter((item, index) => contentMatchesType(item, ["KR", "Landing"]) || index % 2 === 0);
-      }
-      if (property === "EN") {
-        content = content.filter((item, index) => contentMatchesType(item, ["EN"]) || index % 2 === 1);
+      // No mock: show real GA4/Search Console data when synced, otherwise an
+      // empty state (KPIs are N/A from the base channel, no fabricated content).
+      if (hasRealWebsiteDataset) {
+        const accountKey = property === "KR" ? "kr" : property === "EN" ? "en" : undefined;
+        const content = channel.topContent.filter(
+          (item) => item.performance && (!accountKey || item.accountKey === accountKey),
+        );
+        return {
+          ...channel,
+          kpis: accountKey ? channel.accountKpis?.[accountKey] ?? channel.kpis : channel.kpis,
+          topContent: content,
+          dataNote: `${label} 기준입니다. GA4/Search Console 실데이터를 국문/영문 속성별로 분리해 보여줍니다.`,
+        };
       }
 
-      return {
-        ...channel,
-        kpis:
-          analysis === "검색"
-            ? [
-                metric("검색 노출", formatNumber(84200 * propertyScale), "+17%"),
-                metric("검색 클릭", formatNumber(3420 * propertyScale), "+14%"),
-                metric("클릭률", property === "EN" ? "3.2%" : "4.1%", "+3%"),
-                metric("문의", formatNumber(34 * propertyScale), "+21%"),
-              ]
-            : [
-                metric("사용자", formatNumber(12840 * propertyScale), "+20%"),
-                metric("신규 사용자", formatNumber(9204 * propertyScale), "+22%"),
-                metric("검색 노출", formatNumber(84200 * propertyScale), "+17%"),
-                metric("검색 클릭", formatNumber(3420 * propertyScale), "+14%"),
-              ],
-        trend: scaleTrend(channel.trend, propertyScale || 1, analysis === "검색" ? 6 : 0),
-        topContent: decorateContentVariant(content, channel.topContent, label, analysis === "검색" ? "검색 클릭" : undefined),
-        dataNote: `${label} 기준입니다. KR/EN 속성과 검색 지표를 분리해 GA4와 Search Console 값을 섞지 않고 봅니다.`,
-      };
+      return { ...channel, topContent: [] };
     }
 
     case "linkedin": {
       const scope = pickFilter(filters["범위"], ["전체", "게시물", "팔로워"] as const, "전체");
-      if (scope === "게시물") {
+      const hasRealLinkedinDataset = channel.topContent.some((item) => item.performance);
+
+      // No mock: show real uploaded LinkedIn data when present, otherwise empty.
+      if (hasRealLinkedinDataset) {
         return {
           ...channel,
-          kpis: [
-            metric("팔로워", "7,694명", "+5%", "complete", "+42명"),
-            metric("노출", "5,280", "+12%", "partial"),
-            metric("클릭", "326", "+9%", "partial"),
-            metric("댓글", "28", "+4%"),
-          ],
-          trend: scaleTrend(channel.trend, 0.82, 3),
-          topContent: decorateContentVariant(channel.topContent, channel.topContent, "게시물", "노출"),
-          dataNote: "LinkedIn 게시물 기준입니다. 파일 업로드의 게시물 노출·클릭·댓글만 분리해 표시합니다.",
+          topContent: channel.topContent.filter((item) => item.performance),
+          dataNote:
+            scope === "전체"
+              ? channel.dataNote
+              : `LinkedIn ${scope} 기준입니다. 업로드 파일의 실데이터를 표시합니다.`,
         };
       }
 
-      if (scope === "팔로워") {
-        return {
-          ...channel,
-          kpis: [
-            metric("팔로워", "7,694명", "+11%", "complete", "+86명"),
-            metric("노출", "2,414", "+7%", "partial"),
-            metric("클릭", "86", "+5%", "partial"),
-            metric("댓글", "6", "+2%"),
-          ],
-          trend: scaleTrend(channel.trend, 0.64, 5),
-          topContent: decorateContentVariant(channel.topContent, channel.topContent, "팔로워 기여", "신규 팔로워"),
-          dataNote: "LinkedIn 팔로워 기준입니다. 신규 팔로워를 현재 팔로워 수 옆 증가분으로 표시합니다.",
-        };
-      }
-
-      return channel;
+      return { ...channel, topContent: [] };
     }
 
     case "naver": {

@@ -1,5 +1,5 @@
 import type { PeriodMode } from "./adapters/types";
-import { getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
+import { ensureFreshSession, getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
 
 export type YoutubeSyncRequest = {
   periodMode: PeriodMode;
@@ -48,6 +48,7 @@ export async function syncYoutubeAnalytics(request: YoutubeSyncRequest): Promise
     throw new Error("Supabase 환경변수가 없어 YouTube API 동기화를 실행할 수 없습니다.");
   }
 
+  await ensureFreshSession();
   const supabase = getSupabaseClient();
   const { data, error } = await supabase.functions.invoke("youtube-sync", {
     body: request,
