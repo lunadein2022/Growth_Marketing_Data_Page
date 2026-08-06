@@ -1,6 +1,7 @@
 import type { CommandCenterSnapshot, DataStatus, KpiCard, PeriodMode, TrendPoint } from "./adapters/types";
 import { getSupabaseClient, hasSupabaseConfig } from "./supabaseClient";
 import { channelMeta } from "../data/mockData";
+import type { DateRange } from "./periodComparison";
 
 const ORG_ID = "00000000-0000-0000-0000-000000000001";
 
@@ -98,6 +99,7 @@ export async function loadCommandCenterPatch(periodMode: PeriodMode): Promise<Co
   const perChannel = new Map<string, { views: number; reach: number; status: DataStatus }>();
   let totalViews = 0;
   let totalReach = 0;
+  let totalWebsiteUsers = 0;
   let channelsWithViews = 0;
 
   for (const snapshot of snapshots) {
@@ -105,6 +107,7 @@ export async function loadCommandCenterPatch(periodMode: PeriodMode): Promise<Co
     const reach = num(snapshot.metrics, "reach");
     totalViews += views;
     totalReach += reach;
+    if (snapshot.channel === "website") totalWebsiteUsers += num(snapshot.metrics, "users");
     if (views > 0) channelsWithViews += 1;
 
     const current = perChannel.get(snapshot.channel) ?? { views: 0, reach: 0, status: snapshot.status };
@@ -152,6 +155,13 @@ export async function loadCommandCenterPatch(periodMode: PeriodMode): Promise<Co
       status: totalReach ? "partial" : "not_uploaded",
       source: "Instagram 도달 등 · Supabase 실데이터",
     },
+    "검색 가시성": {
+      value: totalWebsiteUsers ? formatCount(totalWebsiteUsers) : "N/A",
+      delta: "실데이터",
+      tone: "neutral",
+      status: totalWebsiteUsers ? "complete" : "not_uploaded",
+      source: "홈페이지 사용자 · Supabase 실데이터",
+    },
   };
 
   const channelHighlights = [...perChannel.entries()].map(([channel, aggregate]) => {
@@ -172,6 +182,111 @@ export async function loadCommandCenterPatch(periodMode: PeriodMode): Promise<Co
     channelHighlights: channelHighlights.length ? channelHighlights : undefined,
     trends: trends.length ? trends : undefined,
   };
+}
+
+// Range-based Command Center aggregation for the global period filter: KPIs are
+// summed over the current range (delta vs the past range), trend is the current
+// range's daily total views (monthly-bucketed for long ranges).
+type RangeSeriesRow = { channel: string; metric_key: string; point_date: string; value: number | null };
+
+function pct(prev: number, cur: number): { delta: string; tone: KpiCard["tone"] } {
+  if (prev <= 0) return { delta: "실데이터", tone: "neutral" };
+  const value = Math.round(((cur - prev) / prev) * 100);
+  return { delta: `${value >= 0 ? "+" : ""}${value}%`, tone: value > 0 ? "up" : value < 0 ? "down" : "neutral" };
+}
+
+export async function loadCommandCenterPeriodPatch(current: DateRange, previous: DateRange): Promise<CommandCenterPatch | null> {
+  if (!hasSupabaseConfig()) return null;
+  const supabase = getSupabaseClient();
+
+  const { data: accountsData, error: accountsError } = await supabase
+    .from("channel_accounts")
+    .select("id, channel")
+    .eq("org_id", ORG_ID);
+  if (accountsError) throw accountsError;
+  const accounts = (accountsData ?? []) as Array<{ id: string; channel: string }>;
+  if (!accounts.length) return null;
+  const accountIds = accounts.map((account) => account.id);
+
+  const lo = [previous.start, current.start].sort()[0];
+  const hi = [previous.end, current.end].sort().reverse()[0];
+  const { data: seriesData, error: seriesError } = await supabase
+    .from("metric_time_series")
+    .select("channel, metric_key, point_date, value")
+    .eq("org_id", ORG_ID)
+    .eq("owner_type", "channel")
+    .in("owner_id", accountIds)
+    .in("metric_key", ["views", "reach", "users"])
+    .gte("point_date", lo)
+    .lte("point_date", hi);
+  if (seriesError) throw seriesError;
+  const rows = (seriesData ?? []) as RangeSeriesRow[];
+
+  const sumIn = (key: string, range: DateRange, channel?: string) =>
+    rows
+      .filter(
+        (row) =>
+          row.metric_key === key &&
+          row.value !== null &&
+          row.point_date >= range.start &&
+          row.point_date <= range.end &&
+          (!channel || row.channel === channel),
+      )
+      .reduce((total, row) => total + Number(row.value), 0);
+
+  const viewsCur = sumIn("views", current);
+  const viewsPrev = sumIn("views", previous);
+  const reachCur = sumIn("reach", current);
+  const reachPrev = sumIn("reach", previous);
+  const usersCur = sumIn("users", current, "website");
+  const usersPrev = sumIn("users", previous, "website");
+
+  const viewsGrowth = pct(viewsPrev, viewsCur);
+  const reachGrowth = pct(reachPrev, reachCur);
+  const usersGrowth = pct(usersPrev, usersCur);
+  const rangeLabel = `${current.start} ~ ${current.end}`;
+
+  const kpiUpdates: CommandCenterPatch["kpiUpdates"] = {
+    "콘텐츠 소비": {
+      value: viewsCur ? formatCount(viewsCur) : "N/A",
+      delta: viewsGrowth.delta,
+      tone: viewsGrowth.tone,
+      status: viewsCur ? "complete" : "not_uploaded",
+      source: `채널 조회수 합계 · ${rangeLabel}`,
+    },
+    "브랜드 노출": {
+      value: reachCur ? formatCount(reachCur) : "N/A",
+      delta: reachGrowth.delta,
+      tone: reachGrowth.tone,
+      status: reachCur ? "partial" : "not_uploaded",
+      source: `Instagram 도달 등 · ${rangeLabel}`,
+    },
+    "검색 가시성": {
+      value: usersCur ? formatCount(usersCur) : "N/A",
+      delta: usersGrowth.delta,
+      tone: usersGrowth.tone,
+      status: usersCur ? "complete" : "not_uploaded",
+      source: `홈페이지 사용자 · ${rangeLabel}`,
+    },
+  };
+
+  // Current-range daily total views → trend (monthly-bucketed if > 31 points).
+  const byDate = new Map<string, number>();
+  for (const row of rows) {
+    if (row.metric_key !== "views" || row.value === null || row.point_date < current.start || row.point_date > current.end) continue;
+    byDate.set(row.point_date, (byDate.get(row.point_date) ?? 0) + Number(row.value));
+  }
+  const daily = [...byDate.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  let trends: TrendPoint[];
+  if (daily.length <= 31) {
+    trends = daily.map(([date, value]) => ({ label: shortDate(date), value: Math.round(value) }));
+  } else {
+    const byMonth = new Map<string, number>();
+    for (const [date, value] of daily) byMonth.set(date.slice(0, 7), (byMonth.get(date.slice(0, 7)) ?? 0) + value);
+    trends = [...byMonth.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([ym, value]) => ({ label: `${Number(ym.slice(5, 7))}월`, value: Math.round(value) }));
+  }
+
+  return { kpiUpdates, trends: trends.length ? trends : undefined };
 }
 
 export function applyCommandCenterPatch(

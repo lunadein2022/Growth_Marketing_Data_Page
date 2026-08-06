@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  Trash2,
   Upload,
   X,
 } from "lucide-react";
@@ -102,18 +103,28 @@ import {
 import {
   canUseContentLabData,
   deleteAdFromSupabase,
+  deleteCampaignFromSupabase,
+  deleteContentCardFromSupabase,
+  enrichCampaigns,
   listAds,
+  listCampaigns,
+  listContentCards,
+  updateContentCardStatus,
   upsertAdToSupabase,
+  upsertCampaignToSupabase,
+  upsertContentCardToSupabase,
 } from "./services/contentLabData";
 import {
   canSyncWebsiteAnalytics,
   syncWebsiteAnalytics,
   type WebsiteSyncState,
 } from "./services/websiteSync";
+import { syncMetaAds, type MetaAdsSyncResult } from "./services/metaAdsSync";
 import {
   applyCommandCenterPatch,
   canLoadCommandCenterData,
   loadCommandCenterPatch,
+  loadCommandCenterPeriodPatch,
 } from "./services/commandCenterData";
 import {
   canComparePeriods,
@@ -152,6 +163,7 @@ import type {
   CampaignRow,
   DataCenterSnapshot,
   DataStatus,
+  KpiCard,
   PeriodMode,
   PublishingItem,
   TrendPoint,
@@ -1035,6 +1047,7 @@ function App() {
   const [dataCenter, setDataCenter] = useState<DataCenterSnapshot | null>(null);
   const [selectedChannel, setSelectedChannel] = useState<Exclude<ChannelId, "all">>("youtube");
   const [selectedContentTab, setSelectedContentTab] = useState<ContentTab>("publishing");
+  const [focusAdId, setFocusAdId] = useState<string | null>(null);
   const [compareOpen, setCompareOpen] = useState(false);
   const [activePeriod, setActivePeriod] = useState<{ current: DateRange; previous: DateRange } | null>(null);
   const [briefing, setBriefing] = useState<AiBriefing | null>(null);
@@ -1190,13 +1203,14 @@ function App() {
 
     let mounted = true;
 
-    listAds()
-      .then((ads) => {
+    Promise.all([listAds(), listContentCards(), listCampaigns()])
+      .then(([ads, pipeline, campaignsBase]) => {
         if (!mounted) return;
-        setContentLab((current) => (current ? { ...current, ads } : current));
+        const campaigns = enrichCampaigns(campaignsBase, ads, pipeline);
+        setContentLab((current) => (current ? { ...current, ads, pipeline, campaigns } : current));
       })
       .catch((error) => {
-        console.warn("Saved ads could not be loaded.", error);
+        console.warn("Saved Content Lab data could not be loaded.", error);
       });
 
     return () => {
@@ -1209,7 +1223,13 @@ function App() {
 
     let mounted = true;
 
-    loadCommandCenterPatch(periodMode)
+    // When a global period is active, aggregate over that range; otherwise use
+    // the periodMode (weekly/monthly) snapshot patch.
+    const patchPromise = activePeriod
+      ? loadCommandCenterPeriodPatch(activePeriod.current, activePeriod.previous)
+      : loadCommandCenterPatch(periodMode);
+
+    patchPromise
       .then((patch) => {
         if (!mounted || !patch) return;
         setSnapshot((current) => (current ? applyCommandCenterPatch(current, patch) : current));
@@ -1222,7 +1242,7 @@ function App() {
       mounted = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authUser?.uid, periodMode, snapshot ? "ready" : "empty", channelDataSignature]);
+  }, [authUser?.uid, periodMode, activePeriod, snapshot ? "ready" : "empty", channelDataSignature]);
 
   useEffect(() => {
     if (!authUser || !canLoadDataCenterSyncStatus()) return;
@@ -1411,15 +1431,43 @@ function App() {
     return mergedContentLab;
   };
 
-  const handleSaveContentCard = async (card: ContentItem) => replaceContentLab(await provider.upsertContentCard(card, periodMode));
-  const handleMoveContentCard = async (contentId: string, status: string) =>
-    replaceContentLab(await provider.moveContentCard(contentId, status, periodMode));
-  const handleDeleteContentCard = async (contentId: string) =>
-    replaceContentLab(await provider.deleteContentCard(contentId, periodMode));
+  const persistPipelineChange = async (mutate: () => Promise<void>) => {
+    await mutate();
+    const pipeline = await listContentCards();
+    const next = contentLab ? { ...contentLab, pipeline } : contentLab;
+    if (next) setContentLab(next);
+    return next as ContentLabSnapshot;
+  };
+  const handleSaveContentCard = async (card: ContentItem) => {
+    if (canUseContentLabData() && authUser && contentLab) {
+      return persistPipelineChange(() => upsertContentCardToSupabase(card));
+    }
+    return replaceContentLab(await provider.upsertContentCard(card, periodMode));
+  };
+  const handleMoveContentCard = async (contentId: string, status: string) => {
+    if (canUseContentLabData() && authUser && contentLab) {
+      return persistPipelineChange(() => updateContentCardStatus(contentId, status));
+    }
+    return replaceContentLab(await provider.moveContentCard(contentId, status, periodMode));
+  };
+  const handleDeleteContentCard = async (contentId: string) => {
+    if (canUseContentLabData() && authUser && contentLab) {
+      return persistPipelineChange(() => deleteContentCardFromSupabase(contentId));
+    }
+    return replaceContentLab(await provider.deleteContentCard(contentId, periodMode));
+  };
   const handleCreateCampaignFromContent = async (sourceContentId?: string) => {
     if (contentLab) {
       const generatedCampaign = buildGeneratedCampaignFromContentLab(contentLab, sourceContentId);
       if (generatedCampaign) {
+        // Persist to Supabase when signed in, then reload with derived counts.
+        if (canUseContentLabData() && authUser) {
+          await upsertCampaignToSupabase(generatedCampaign);
+          const [ads, pipeline, campaignsBase] = await Promise.all([listAds(), listContentCards(), listCampaigns()]);
+          const next = { ...contentLab, ads, pipeline, campaigns: enrichCampaigns(campaignsBase, ads, pipeline) };
+          setContentLab(next);
+          return next;
+        }
         return replaceContentLab({
           ...contentLab,
           campaigns: [generatedCampaign, ...contentLab.campaigns],
@@ -1428,6 +1476,24 @@ function App() {
     }
 
     return replaceContentLab(await provider.createCampaignFromContent(sourceContentId, periodMode));
+  };
+  const handleDeleteCampaign = async (name: string) => {
+    if (!contentLab) return;
+    if (canUseContentLabData() && authUser) {
+      await deleteCampaignFromSupabase(name);
+      const [ads, pipeline, campaignsBase] = await Promise.all([listAds(), listContentCards(), listCampaigns()]);
+      setContentLab({ ...contentLab, ads, pipeline, campaigns: enrichCampaigns(campaignsBase, ads, pipeline) });
+      return;
+    }
+    setContentLab({ ...contentLab, campaigns: contentLab.campaigns.filter((campaign) => campaign.campaign !== name) });
+  };
+  const handleSyncMetaAds = async (): Promise<MetaAdsSyncResult> => {
+    const result = await syncMetaAds();
+    if (contentLab) {
+      const ads = await listAds();
+      setContentLab({ ...contentLab, ads });
+    }
+    return result;
   };
   const handleSaveAd = async (ad: AdContent) => {
     if (canUseContentLabData() && authUser && contentLab) {
@@ -1858,6 +1924,12 @@ function App() {
                 naverMonthlyReport={naverMonthlyReport}
                 naverMonthlyReports={naverMonthlyReports}
                 activePeriod={activePeriod}
+                ads={contentLab?.ads ?? []}
+                onOpenAd={(adId) => {
+                  setFocusAdId(adId);
+                  setSelectedContentTab("ads");
+                  setActiveView("content");
+                }}
                 onGenerate={() => handleGenerateBriefing("channel", selectedChannel)}
               />
             )}
@@ -1872,8 +1944,17 @@ function App() {
                 onMoveContentCard={handleMoveContentCard}
                 onDeleteContentCard={handleDeleteContentCard}
                 onCreateCampaignFromContent={handleCreateCampaignFromContent}
+                onDeleteCampaign={handleDeleteCampaign}
                 onSaveAd={handleSaveAd}
                 onDeleteAd={handleDeleteAd}
+                onSyncMetaAds={handleSyncMetaAds}
+                activePeriod={activePeriod}
+                focusAdId={focusAdId}
+                onFocusAdHandled={() => setFocusAdId(null)}
+                onOpenChannel={(channelId) => {
+                  setSelectedChannel(channelId);
+                  setActiveView("channels");
+                }}
               />
             )}
             {activeView === "data" && (
@@ -1959,6 +2040,26 @@ function CommandCenter({
   const operatingTasks = useMemo(() => getOperatingTasks(snapshot, contentLab), [snapshot, contentLab]);
   const reuseRecommendations = useMemo(() => getReuseRecommendations(contentLab), [contentLab]);
   const briefingWarnings = useMemo(() => getBriefingWarnings(channels, dataCenter), [channels, dataCenter]);
+  const compliance = useMemo(
+    () => computePublishingCompliance(contentLab, startOfMonth(TODAY), endOfMonth(TODAY)),
+    [contentLab],
+  );
+  const kpis = useMemo(
+    () =>
+      snapshot.kpis.map((kpi) =>
+        kpi.label === "발행 건강도"
+          ? {
+              ...kpi,
+              value: `${compliance.rate}%`,
+              delta: `${compliance.published}/${compliance.planned} 발행`,
+              tone: (compliance.rate >= 80 ? "up" : compliance.rate >= 50 ? "neutral" : "down") as KpiCard["tone"],
+              status: (compliance.planned > 0 ? "complete" : "not_uploaded") as DataStatus,
+              source: "발행 준수율 · 규칙 대비 실제 발행",
+            }
+          : kpi,
+      ),
+    [snapshot.kpis, compliance],
+  );
 
   return (
     <div className="screen-stack">
@@ -1983,7 +2084,7 @@ function CommandCenter({
       <BriefingReadinessPanel warnings={briefingWarnings} />
 
       <section className="metric-grid">
-        {snapshot.kpis.map((kpi) => (
+        {kpis.map((kpi) => (
           <div className="metric-tile" key={kpi.label}>
             <div className="tile-head">
               <span>{kpi.label}</span>
@@ -2049,7 +2150,7 @@ function CommandCenter({
         <div className="section-header">
           <div>
             <h2>월간 발행 캘린더</h2>
-            <p>2026년 7월 · 계획 42건 / 완료 31건 / 지연 1건</p>
+            <p>{formatCalendarTitle(TODAY, "month")} · 계획 {compliance.planned}건 / 완료 {compliance.published}건</p>
           </div>
           <button className="button secondary small" onClick={onOpenPublishingPlan}>
             <Settings size={15} />
@@ -2123,9 +2224,9 @@ function TodayTaskPanel({ tasks }: { tasks: OperatingTask[] }) {
       <div className="section-header">
         <div>
           <h2>오늘 할 일</h2>
-          <p>지연 발행 · 성과 급등 · 광고 종료 임박 자동 큐</p>
+          <p>지연 발행 · 성과 급등 · 광고 종료 임박 자동 큐 · 아래 항목은 예시</p>
         </div>
-        <Bell size={18} />
+        <DemoBadge />
       </div>
       <div className="task-list">
         {tasks.map((task) => {
@@ -2154,9 +2255,9 @@ function ReuseRecommendationPanel({ recommendations }: { recommendations: ReuseR
       <div className="section-header">
         <div>
           <h2>콘텐츠 재활용 추천</h2>
-          <p>YouTube 상위 Shorts를 다른 채널 초안으로 전환</p>
+          <p>YouTube 상위 Shorts를 다른 채널 초안으로 전환 · 예시</p>
         </div>
-        <RefreshCw size={18} />
+        <DemoBadge />
       </div>
       <div className="reuse-list">
         {recommendations.map((recommendation) => (
@@ -2660,6 +2761,8 @@ function ChannelsView({
   naverMonthlyReport,
   naverMonthlyReports,
   activePeriod,
+  ads,
+  onOpenAd,
   onGenerate,
 }: {
   channels: ChannelView[];
@@ -2669,6 +2772,8 @@ function ChannelsView({
   naverMonthlyReport: NaverMonthlyReport | null;
   naverMonthlyReports: NaverMonthlyReport[];
   activePeriod: { current: DateRange; previous: DateRange } | null;
+  ads: AdContent[];
+  onOpenAd: (adId: string) => void;
   onGenerate: () => void;
 }) {
   const [selectedFilters, setSelectedFilters] = useState<Record<string, string>>({});
@@ -2711,6 +2816,15 @@ function ChannelsView({
 
   const baseFilteredChannel = useMemo(() => getFilteredChannelView(channel, selectedFilters), [channel, selectedFilters]);
   const periodAccountKey = getPeriodAccountKey(channel.id, selectedFilters);
+
+  // Ads registered for this channel (and the selected account tab, if any).
+  const channelAds = useMemo(
+    () =>
+      ads.filter(
+        (ad) => ad.channel === channel.id && (!periodAccountKey || !ad.accountKey || ad.accountKey === periodAccountKey),
+      ),
+    [ads, channel.id, periodAccountKey],
+  );
 
   // Global period filter: when a period is active (set in the top-bar picker),
   // override this channel's KPIs + trend and filter the content list to the
@@ -2920,8 +3034,9 @@ function ChannelsView({
           <div className="section-header">
             <div>
               <h2>다음 액션</h2>
-              <p>성과 기반 운영 후보</p>
+              <p>운영 가이드 예시 · 실데이터 기반 추천은 준비 중</p>
             </div>
+            <DemoBadge label="예시 가이드" />
           </div>
           <div className="action-list">
             <ActionItem label="재활용" text="상위 소재를 LinkedIn 카드뉴스와 Naver Blog로 확장" />
@@ -2941,7 +3056,61 @@ function ChannelsView({
             <p>수집된 콘텐츠 전체 · 성과 지표 클릭 시 해당 기준으로 정렬</p>
           </div>
         </div>
-        <ChannelContentPerformanceTable items={filteredChannel.topContent} />
+        <ChannelContentPerformanceTable items={filteredChannel.topContent} channel={filteredChannel.id} />
+      </section>
+
+      <section className="section-panel">
+        <div className="section-header">
+          <div>
+            <h2>이 채널 광고</h2>
+            <p>Content Lab에 등록된 광고와 연결됩니다 · 클릭 시 광고 상세로 이동</p>
+          </div>
+          <span className="source-kind">{channelAds.length}건</span>
+        </div>
+        {channelAds.length === 0 ? (
+          <div className="inline-note">
+            <AlertCircle size={16} />
+            이 채널{periodAccountKey ? " · 선택 계정" : ""}에 등록된 광고가 없습니다. Content Lab → 광고 탭에서 등록하세요.
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>광고</th>
+                  <th>계정</th>
+                  <th>기간</th>
+                  <th>예산</th>
+                  <th>노출</th>
+                  <th>클릭</th>
+                  <th>CTR</th>
+                  <th>상태</th>
+                </tr>
+              </thead>
+              <tbody>
+                {channelAds.map((ad) => (
+                  <tr className="clickable-row" key={ad.id} onClick={() => onOpenAd(ad.id)}>
+                    <td>
+                      <strong>{ad.title}</strong>
+                      <span>{ad.campaign}</span>
+                    </td>
+                    <td>{ad.accountKey ? adAccountLabel(ad.channel, ad.accountKey) : "전체"}</td>
+                    <td>{ad.period}</td>
+                    <td>{ad.budget}</td>
+                    <td>{ad.impressions}</td>
+                    <td>{ad.clicks}</td>
+                    <td>{ad.ctr}</td>
+                    <td>
+                      <span className={`status-pill ad-${ad.status}`}>
+                        {ad.status === "active" ? "집행중" : ad.status === "planned" ? "예정" : "종료"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );
@@ -2978,9 +3147,9 @@ function YouTubeAiInsightPanel() {
         <div className="section-header">
           <div>
             <h2>AI 패턴 분석</h2>
-            <p>영상 34편 기준 · YouTube Analytics + Claude 분석 예정</p>
+            <p>YouTube Analytics + Claude 분석 예정 · 아래 수치는 예시</p>
           </div>
-          <Bot size={18} />
+          <DemoBadge />
         </div>
         <div className="ai-pattern-grid">
           {patterns.map((pattern) => (
@@ -3173,8 +3342,14 @@ function ContentLab({
   onMoveContentCard,
   onDeleteContentCard,
   onCreateCampaignFromContent,
+  onDeleteCampaign,
   onSaveAd,
   onDeleteAd,
+  onSyncMetaAds,
+  activePeriod,
+  focusAdId,
+  onFocusAdHandled,
+  onOpenChannel,
 }: {
   data: ContentLabSnapshot;
   selectedTab: ContentTab;
@@ -3185,10 +3360,25 @@ function ContentLab({
   onMoveContentCard: (contentId: string, status: string) => Promise<ContentLabSnapshot>;
   onDeleteContentCard: (contentId: string) => Promise<ContentLabSnapshot>;
   onCreateCampaignFromContent: (sourceContentId?: string) => Promise<ContentLabSnapshot>;
+  onDeleteCampaign: (name: string) => Promise<void>;
   onSaveAd: (ad: AdContent) => Promise<ContentLabSnapshot>;
   onDeleteAd: (adId: string) => Promise<ContentLabSnapshot>;
+  onSyncMetaAds: () => Promise<MetaAdsSyncResult>;
+  activePeriod: { current: DateRange; previous: DateRange } | null;
+  focusAdId: string | null;
+  onFocusAdHandled: () => void;
+  onOpenChannel: (channel: Exclude<ChannelId, "all">) => void;
 }) {
   const contentLibrary = useMemo(() => [...data.archive, ...data.pipeline], [data.archive, data.pipeline]);
+
+  // When a global period is active, the archive shows only content published in
+  // the current range (items without a real date are hidden).
+  const archiveItems = useMemo(() => {
+    if (!activePeriod) return data.archive;
+    return data.archive.filter(
+      (item) => item.publishedAt && item.publishedAt >= activePeriod.current.start && item.publishedAt <= activePeriod.current.end,
+    );
+  }, [data.archive, activePeriod]);
 
   return (
     <div className="screen-stack">
@@ -3220,21 +3410,35 @@ function ContentLab({
         />
       )}
       {selectedTab === "campaigns" && (
-        <CampaignPerformance data={data} onGenerate={onGenerateCampaign} onCreateCampaign={onCreateCampaignFromContent} />
+        <CampaignPerformance
+          data={data}
+          onGenerate={onGenerateCampaign}
+          onCreateCampaign={onCreateCampaignFromContent}
+          onDeleteCampaign={onDeleteCampaign}
+        />
       )}
       {selectedTab === "ads" && (
-        <AdContentManager data={data} onGenerate={onGenerateAd} onSaveAd={onSaveAd} onDeleteAd={onDeleteAd} />
+        <AdContentManager
+          data={data}
+          onGenerate={onGenerateAd}
+          onSaveAd={onSaveAd}
+          onDeleteAd={onDeleteAd}
+          onSyncMetaAds={onSyncMetaAds}
+          focusAdId={focusAdId}
+          onFocusAdHandled={onFocusAdHandled}
+          onOpenChannel={onOpenChannel}
+        />
       )}
       {selectedTab === "archive" && (
         <section className="section-panel">
           <div className="section-header">
             <div>
               <h2>발행 전체 아카이브</h2>
-              <p>채널별 필터와 성과 연결</p>
+              <p>{activePeriod ? `${activePeriod.current.start} ~ ${activePeriod.current.end} 발행분` : "채널별 필터와 성과 연결"}</p>
             </div>
             <Search size={18} />
           </div>
-          <ContentTable items={data.archive} />
+          <ContentTable items={archiveItems} />
         </section>
       )}
     </div>
@@ -3328,6 +3532,26 @@ function getPublishingCalendarEvents(data: ContentLabSnapshot, rangeStart: Date,
     if (dateDiff !== 0) return dateDiff;
     return (a.time ?? "").localeCompare(b.time ?? "");
   });
+}
+
+// Publishing compliance = actual published content vs the total slots the
+// publishing rules schedule over the period. Powers the "발행 건강도" KPI.
+function computePublishingCompliance(data: ContentLabSnapshot, rangeStart: Date, rangeEnd: Date) {
+  let planned = 0;
+  for (let cursor = startOfDay(rangeStart); cursor <= startOfDay(rangeEnd); cursor = addDays(cursor, 1)) {
+    const weekday = getWeekdayLabel(cursor);
+    data.publishingRules.forEach((rule) => {
+      if (rule.days.includes(weekday)) planned += 1;
+    });
+  }
+  const published = buildContentCalendarEvents(data).filter(
+    (event) =>
+      event.source === "content" &&
+      isWithinRange(event.date, rangeStart, rangeEnd) &&
+      (event.locked || event.status === "published"),
+  ).length;
+  const rate = planned > 0 ? Math.min(100, Math.round((published / planned) * 100)) : 0;
+  return { planned, published, rate };
 }
 
 function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
@@ -4131,10 +4355,12 @@ function CampaignPerformance({
   data,
   onGenerate,
   onCreateCampaign,
+  onDeleteCampaign,
 }: {
   data: ContentLabSnapshot;
   onGenerate: (campaign?: string) => void;
   onCreateCampaign: (sourceContentId?: string) => Promise<ContentLabSnapshot>;
+  onDeleteCampaign: (name: string) => Promise<void>;
 }) {
   const [selectedCampaign, setSelectedCampaign] = useState<CampaignRow | null>(null);
   const campaignData = data;
@@ -4237,6 +4463,11 @@ function CampaignPerformance({
           data={campaignData}
           onClose={() => setSelectedCampaign(null)}
           onGenerate={() => onGenerate(selectedCampaign.campaign)}
+          onDelete={async () => {
+            const name = selectedCampaign.campaign;
+            setSelectedCampaign(null);
+            await onDeleteCampaign(name);
+          }}
         />
       )}
     </>
@@ -4248,11 +4479,13 @@ function CampaignDetailModal({
   data,
   onClose,
   onGenerate,
+  onDelete,
 }: {
   campaign: CampaignRow;
   data: ContentLabSnapshot;
   onClose: () => void;
   onGenerate: () => void;
+  onDelete?: () => void;
 }) {
   const content = getCampaignContent(data, campaign);
   const channelRows = getCampaignChannelRows(campaign);
@@ -4269,10 +4502,18 @@ function CampaignDetailModal({
             <h2>{campaign.campaign}</h2>
             <p>{campaign.objective}</p>
           </div>
-          <button className="button dark" onClick={onGenerate}>
-            <Bot size={16} />
-            이 캠페인 AI 브리핑
-          </button>
+          <div className="summary-actions">
+            {onDelete && (
+              <button className="button secondary" onClick={onDelete}>
+                <Trash2 size={16} />
+                삭제
+              </button>
+            )}
+            <button className="button dark" onClick={onGenerate}>
+              <Bot size={16} />
+              이 캠페인 AI 브리핑
+            </button>
+          </div>
         </div>
 
         <div className="campaign-kpi-grid">
@@ -4382,15 +4623,53 @@ function AdContentManager({
   onGenerate,
   onSaveAd,
   onDeleteAd,
+  onSyncMetaAds,
+  focusAdId,
+  onFocusAdHandled,
+  onOpenChannel,
 }: {
   data: ContentLabSnapshot;
   onGenerate: (ad?: string) => void;
   onSaveAd: (ad: AdContent) => Promise<ContentLabSnapshot>;
   onDeleteAd: (adId: string) => Promise<ContentLabSnapshot>;
+  onSyncMetaAds?: () => Promise<MetaAdsSyncResult>;
+  focusAdId?: string | null;
+  onFocusAdHandled?: () => void;
+  onOpenChannel?: (channel: Exclude<ChannelId, "all">) => void;
 }) {
   const [editingAd, setEditingAd] = useState<AdContent | null>(null);
   const [selectedAd, setSelectedAd] = useState<AdContent | null>(null);
+  const [metaSyncing, setMetaSyncing] = useState(false);
+  const [metaSyncNote, setMetaSyncNote] = useState<string | null>(null);
   const contentLibrary = useMemo(() => getAdContentLibrary(data), [data]);
+
+  const runMetaSync = async () => {
+    if (!onSyncMetaAds || metaSyncing) return;
+    setMetaSyncing(true);
+    setMetaSyncNote(null);
+    try {
+      const result = await onSyncMetaAds();
+      const total = result.accounts.reduce((sum, account) => sum + account.adsSynced, 0);
+      const failed = result.accounts.filter((account) => account.status.startsWith("error"));
+      setMetaSyncNote(
+        failed.length
+          ? `${total}개 저장 · 일부 계정 실패: ${failed.map((account) => `${account.accountKey}(${account.status})`).join(", ")}`
+          : `Meta 광고 ${total}개 동기화 완료 · 계정 ${result.accounts.length}개`,
+      );
+    } catch (error) {
+      setMetaSyncNote(`동기화 실패: ${error instanceof Error ? error.message : "오류"}`);
+    } finally {
+      setMetaSyncing(false);
+    }
+  };
+
+  // Deep-link from a channel's ads section: open the requested ad's detail.
+  useEffect(() => {
+    if (!focusAdId) return;
+    const target = data.ads.find((ad) => ad.id === focusAdId);
+    if (target) setSelectedAd(target);
+    onFocusAdHandled?.();
+  }, [focusAdId, data.ads, onFocusAdHandled]);
   const adsPagination = usePaginatedItems(data.ads);
   const activeCount = data.ads.filter((ad) => ad.status === "active").length;
   const plannedCount = data.ads.filter((ad) => ad.status === "planned").length;
@@ -4438,6 +4717,12 @@ function AdContentManager({
           <p>광고 집행 콘텐츠와 원본 콘텐츠 성과를 연결합니다.</p>
         </div>
         <div className="summary-actions">
+          {onSyncMetaAds && (
+            <button className="button secondary" onClick={runMetaSync} disabled={metaSyncing}>
+              {metaSyncing ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+              Meta 광고 동기화
+            </button>
+          )}
           <button className="button secondary" onClick={openNewAd}>
             <Plus size={16} />
             광고 등록
@@ -4448,6 +4733,7 @@ function AdContentManager({
           </button>
         </div>
       </section>
+      {metaSyncNote && <div className="inline-note"><AlertCircle size={16} />{metaSyncNote}</div>}
 
       <section className="metric-grid compact">
         <div className="metric-tile">
@@ -4540,6 +4826,15 @@ function AdContentManager({
             setEditingAd(selectedAd);
           }}
           onGenerate={() => onGenerate(selectedAd.title)}
+          onOpenChannel={
+            onOpenChannel
+              ? () => {
+                  const channel = selectedAd.channel;
+                  setSelectedAd(null);
+                  onOpenChannel(channel);
+                }
+              : undefined
+          }
         />
       )}
       {editingAd && (
@@ -4640,12 +4935,14 @@ function AdPerformanceModal({
   onClose,
   onEdit,
   onGenerate,
+  onOpenChannel,
 }: {
   ad: AdContent;
   sourceContent?: ContentItem;
   onClose: () => void;
   onEdit: () => void;
   onGenerate: () => void;
+  onOpenChannel?: () => void;
 }) {
   const performance = getAdPerformanceSummary(ad);
 
@@ -4656,9 +4953,18 @@ function AdPerformanceModal({
           <div>
             <span className="eyebrow">Paid Content Detail</span>
             <h2>{ad.title}</h2>
-            <p>{ad.period} · {ad.campaign} · {channelMeta[ad.channel].label}</p>
+            <p>
+              {ad.period} · {ad.campaign} · {channelMeta[ad.channel].label}
+              {ad.accountKey ? ` · ${adAccountLabel(ad.channel, ad.accountKey)}` : ""}
+            </p>
           </div>
           <div className="summary-actions">
+            {onOpenChannel && (
+              <button className="button secondary" onClick={onOpenChannel}>
+                <BarChart3 size={16} />
+                채널에서 보기
+              </button>
+            )}
             <button className="button secondary" onClick={onEdit}>
               <FileText size={16} />
               광고 정보 편집
@@ -6073,6 +6379,16 @@ function StatusPill({ status }: { status: DataStatus }) {
   return <span className={`status-pill status-${status}`}>{statusLabel[status]}</span>;
 }
 
+// Marks widgets showing placeholder/sample content (not connected real data) so
+// they aren't mistaken for live metrics.
+function DemoBadge({ label = "예시" }: { label?: string }) {
+  return (
+    <span className="demo-badge" title="실데이터가 아닌 예시입니다. 채널이 연결·수집되면 실제 값으로 바뀝니다.">
+      {label}
+    </span>
+  );
+}
+
 function ChannelBadge({ channel, compact = false }: { channel: Exclude<ChannelId, "all">; compact?: boolean }) {
   const meta = channelMeta[channel];
   return (
@@ -6635,8 +6951,7 @@ function getContentPerformanceRow(item: ContentItem): ContentPerformanceRow {
   };
 }
 
-function ChannelContentPerformanceTable({ items }: { items: ContentItem[] }) {
-  const channel = items[0]?.channel ?? "youtube";
+function ChannelContentPerformanceTable({ items, channel }: { items: ContentItem[]; channel: Exclude<ChannelId, "all"> }) {
   const columns = channelPerformanceColumns[channel];
   const [sortKey, setSortKey] = useState<ContentPerformanceSortKey>(columns[1]?.key ?? "publishTime");
 
