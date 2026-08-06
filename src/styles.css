@@ -2414,6 +2414,63 @@ select {
   cursor: help;
 }
 
+.demo-toggle-bar {
+  position: fixed;
+  right: 18px;
+  bottom: 16px;
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.14);
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.demo-toggle-bar em {
+  font-style: normal;
+  font-weight: 700;
+  color: #64748b;
+}
+
+.demo-switch {
+  position: relative;
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  border: none;
+  background: #cbd5e1;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  flex: none;
+}
+
+.demo-switch.on {
+  background: var(--accent);
+}
+
+.demo-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.3);
+  transition: transform 0.15s ease;
+}
+
+.demo-switch.on .demo-switch-knob {
+  transform: translateX(18px);
+}
+
 .time-chip {
   min-width: 92px;
   min-height: 34px;

@@ -1048,6 +1048,10 @@ function App() {
   const [selectedChannel, setSelectedChannel] = useState<Exclude<ChannelId, "all">>("youtube");
   const [selectedContentTab, setSelectedContentTab] = useState<ContentTab>("publishing");
   const [focusAdId, setFocusAdId] = useState<string | null>(null);
+  const [showDemoData, setShowDemoData] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem("dummdumm.showDemoData") !== "false";
+  });
   const [compareOpen, setCompareOpen] = useState(false);
   const [activePeriod, setActivePeriod] = useState<{ current: DateRange; previous: DateRange } | null>(null);
   const [briefing, setBriefing] = useState<AiBriefing | null>(null);
@@ -1314,7 +1318,34 @@ function App() {
     setDataCenter((current) => (current ? applySavedNaverReportsToDataCenter(current, naverMonthlyReports) : current));
   }, [naverMonthlyReports]);
 
-  const selectedChannelView = channels.find((channel) => channel.id === selectedChannel) ?? channels[0];
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("dummdumm.showDemoData", String(showDemoData));
+    } catch {
+      /* ignore storage errors */
+    }
+  }, [showDemoData]);
+
+  // Demo toggle: when off, hide sample/mock items (isDemo) so only real data shows.
+  const displayChannels = useMemo(
+    () =>
+      showDemoData
+        ? channels
+        : channels.map((channel) => ({ ...channel, topContent: channel.topContent.filter((item) => !item.isDemo) })),
+    [channels, showDemoData],
+  );
+  const displayContentLab = useMemo(() => {
+    if (showDemoData || !contentLab) return contentLab;
+    return {
+      ...contentLab,
+      pipeline: contentLab.pipeline.filter((item) => !item.isDemo),
+      archive: contentLab.archive.filter((item) => !item.isDemo),
+      campaigns: contentLab.campaigns.filter((campaign) => !campaign.isDemo),
+      ads: contentLab.ads.filter((ad) => !ad.isDemo),
+    };
+  }, [contentLab, showDemoData]);
+
+  const selectedChannelView = displayChannels.find((channel) => channel.id === selectedChannel) ?? displayChannels[0];
 
   const buildBriefingContext = (targetChannel?: Exclude<ChannelId, "all">): BriefingContext => {
     const channelView = targetChannel ? channels.find((channel) => channel.id === targetChannel) : undefined;
@@ -1897,8 +1928,8 @@ function App() {
             {activeView === "command" && (
               <CommandCenter
                 snapshot={snapshot}
-                contentLab={contentLab}
-                channels={channels}
+                contentLab={displayContentLab!}
+                channels={displayChannels}
                 dataCenter={dataCenter}
                 periodMode={periodMode}
                 briefingHistory={briefingHistory}
@@ -1917,14 +1948,14 @@ function App() {
             )}
             {activeView === "channels" && selectedChannelView && (
               <ChannelsView
-                channels={channels}
+                channels={displayChannels}
                 selectedChannel={selectedChannel}
                 onSelectChannel={setSelectedChannel}
                 channel={selectedChannelView}
                 naverMonthlyReport={naverMonthlyReport}
                 naverMonthlyReports={naverMonthlyReports}
                 activePeriod={activePeriod}
-                ads={contentLab?.ads ?? []}
+                ads={displayContentLab?.ads ?? []}
                 onOpenAd={(adId) => {
                   setFocusAdId(adId);
                   setSelectedContentTab("ads");
@@ -1935,7 +1966,7 @@ function App() {
             )}
             {activeView === "content" && (
               <ContentLab
-                data={contentLab}
+                data={displayContentLab!}
                 selectedTab={selectedContentTab}
                 onSelectTab={setSelectedContentTab}
                 onGenerateCampaign={(campaign) => handleGenerateBriefing("campaign", undefined, campaign)}
@@ -2010,6 +2041,20 @@ function App() {
           }}
         />
       )}
+
+      <div className="demo-toggle-bar">
+        <span>예시(목업) 데이터</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={showDemoData}
+          className={showDemoData ? "demo-switch on" : "demo-switch"}
+          onClick={() => setShowDemoData((value) => !value)}
+        >
+          <span className="demo-switch-knob" />
+        </button>
+        <em>{showDemoData ? "표시 중 — 데모 데이터 포함" : "숨김 — 실데이터만"}</em>
+      </div>
     </div>
   );
 }
@@ -3332,6 +3377,34 @@ function MessageBubbleIcon() {
   );
 }
 
+// Parse "7/15 - 7/25", "2026.07.29 - 2026.08.05", "2026-01-19 ~ 2026-02-01" → ISO
+// range. Splits only on a spaced separator so it doesn't break ISO dates.
+function parseDateRange(text?: string): { start: string; end: string } | null {
+  if (!text) return null;
+  const parts = text.split(/\s+[-~]\s+/);
+  const toIso = (raw: string): string | null => {
+    const t = raw.trim();
+    const ymd = t.match(/(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})/);
+    if (ymd) return `${ymd[1]}-${ymd[2].padStart(2, "0")}-${ymd[3].padStart(2, "0")}`;
+    const md = t.match(/(\d{1,2})\/(\d{1,2})/);
+    if (md) return `${new Date().getUTCFullYear()}-${md[1].padStart(2, "0")}-${md[2].padStart(2, "0")}`;
+    return null;
+  };
+  const start = toIso(parts[0] ?? "");
+  const end = toIso(parts[1] ?? parts[0] ?? "");
+  if (!start || !end) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+function isoFromPublishDate(publishDate?: string): string | null {
+  if (!publishDate) return null;
+  const ymd = publishDate.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (ymd) return `${ymd[1]}-${ymd[2]}-${ymd[3]}`;
+  const md = publishDate.match(/(\d{1,2})\/(\d{1,2})/);
+  if (md) return `${new Date().getUTCFullYear()}-${md[1].padStart(2, "0")}-${md[2].padStart(2, "0")}`;
+  return null;
+}
+
 function ContentLab({
   data,
   selectedTab,
@@ -3371,14 +3444,39 @@ function ContentLab({
 }) {
   const contentLibrary = useMemo(() => [...data.archive, ...data.pipeline], [data.archive, data.pipeline]);
 
-  // When a global period is active, the archive shows only content published in
-  // the current range (items without a real date are hidden).
+  // When a global period is active, each list is filtered to the current range:
+  // archive/pipeline by publish date (undated planning cards kept), ads/campaigns
+  // by period overlap. Linking libraries (contentLibrary) stay full.
   const archiveItems = useMemo(() => {
     if (!activePeriod) return data.archive;
     return data.archive.filter(
       (item) => item.publishedAt && item.publishedAt >= activePeriod.current.start && item.publishedAt <= activePeriod.current.end,
     );
   }, [data.archive, activePeriod]);
+
+  const periodPipeline = useMemo(() => {
+    if (!activePeriod) return data.pipeline;
+    const { start, end } = activePeriod.current;
+    return data.pipeline.filter((item) => !item.publishedAt || (item.publishedAt >= start && item.publishedAt <= end));
+  }, [data.pipeline, activePeriod]);
+
+  const periodAds = useMemo(() => {
+    if (!activePeriod) return data.ads;
+    const { start, end } = activePeriod.current;
+    return data.ads.filter((ad) => {
+      const range = parseDateRange(ad.period);
+      return !range || (range.start <= end && range.end >= start);
+    });
+  }, [data.ads, activePeriod]);
+
+  const periodCampaigns = useMemo(() => {
+    if (!activePeriod) return data.campaigns;
+    const { start, end } = activePeriod.current;
+    return data.campaigns.filter((campaign) => {
+      const range = parseDateRange(getCampaignUploadPeriod(data, campaign));
+      return !range || (range.start <= end && range.end >= start);
+    });
+  }, [data, activePeriod]);
 
   return (
     <div className="screen-stack">
@@ -3398,10 +3496,16 @@ function ContentLab({
         })}
       </div>
 
-      {selectedTab === "publishing" && <PublishingPlan data={data} />}
+      {selectedTab === "publishing" && <PublishingPlan data={data} activePeriod={activePeriod} />}
+      {activePeriod && (
+        <div className="inline-note period-active-note">
+          <CalendarDays size={16} />
+          기간 필터 적용됨 · {activePeriod.current.start} ~ {activePeriod.current.end}
+        </div>
+      )}
       {selectedTab === "pipeline" && (
         <PipelineBoard
-          items={data.pipeline}
+          items={periodPipeline}
           campaigns={data.campaigns}
           contentLibrary={contentLibrary}
           onMoveCard={onMoveContentCard}
@@ -3411,7 +3515,7 @@ function ContentLab({
       )}
       {selectedTab === "campaigns" && (
         <CampaignPerformance
-          data={data}
+          data={{ ...data, campaigns: periodCampaigns }}
           onGenerate={onGenerateCampaign}
           onCreateCampaign={onCreateCampaignFromContent}
           onDeleteCampaign={onDeleteCampaign}
@@ -3419,7 +3523,7 @@ function ContentLab({
       )}
       {selectedTab === "ads" && (
         <AdContentManager
-          data={data}
+          data={{ ...data, ads: periodAds }}
           onGenerate={onGenerateAd}
           onSaveAd={onSaveAd}
           onDeleteAd={onDeleteAd}
@@ -3554,7 +3658,13 @@ function computePublishingCompliance(data: ContentLabSnapshot, rangeStart: Date,
   return { planned, published, rate };
 }
 
-function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
+function PublishingPlan({
+  data,
+  activePeriod,
+}: {
+  data: ContentLabSnapshot;
+  activePeriod: { current: DateRange; previous: DateRange } | null;
+}) {
   const [ruleTimes, setRuleTimes] = useState<Record<string, string>>(() => readStoredRuleTimes());
 
   const updateRuleTime = (id: string, time: string) => {
@@ -3579,14 +3689,35 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
       return next;
     });
   };
-  const [calendarMode, setCalendarMode] = useState<PublishingCalendarMode>("week");
-  const [cursorDate, setCursorDate] = useState(TODAY);
+  const [calendarMode, setCalendarMode] = useState<PublishingCalendarMode>(activePeriod ? "month" : "week");
+  const [cursorDate, setCursorDate] = useState(activePeriod ? new Date(`${activePeriod.current.start}T00:00:00Z`) : TODAY);
+
+  // When the global period changes, refocus the calendar on it (manual nav still works after).
+  useEffect(() => {
+    if (activePeriod) {
+      setCalendarMode("month");
+      setCursorDate(new Date(`${activePeriod.current.start}T00:00:00Z`));
+    }
+  }, [activePeriod]);
 
   const rangeStart = calendarMode === "week" ? startOfWeek(cursorDate) : startOfMonth(cursorDate);
   const rangeEnd = calendarMode === "week" ? addDays(rangeStart, 6) : endOfMonth(cursorDate);
+  // Rule day/time edits (localStorage) merged into the rules so the calendar's
+  // future slots reflect them (past days are already excluded by the generator).
+  const effectiveData = useMemo(
+    () => ({
+      ...data,
+      publishingRules: data.publishingRules.map((rule) => ({
+        ...rule,
+        days: ruleDays[rule.id] ?? rule.days,
+        time: ruleTimes[rule.id] ?? rule.time,
+      })),
+    }),
+    [data, ruleDays, ruleTimes],
+  );
   const calendarEvents = useMemo(
-    () => getPublishingCalendarEvents(data, rangeStart, rangeEnd),
-    [data, rangeStart.getTime(), rangeEnd.getTime()],
+    () => getPublishingCalendarEvents(effectiveData, rangeStart, rangeEnd),
+    [effectiveData, rangeStart.getTime(), rangeEnd.getTime()],
   );
   const lockedRange = isBeforeDay(rangeEnd, TODAY);
 
@@ -3602,10 +3733,6 @@ function PublishingPlan({ data }: { data: ContentLabSnapshot }) {
           <h1>발행 계획 관리</h1>
           <p>콘텐츠 유형별 발행 규칙과 이번 주 발행 슬롯을 함께 봅니다.</p>
         </div>
-        <button className="button primary">
-          <Plus size={16} />
-          콘텐츠 추가
-        </button>
       </section>
 
       <section className="section-panel">
@@ -3861,6 +3988,17 @@ function PipelineBoard({
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [editingCard, setEditingCard] = useState<ContentItem | null>(null);
   const [columnPages, setColumnPages] = useState<Record<string, number>>({});
+  // Month filter: keeps dated cards (예약/발행됨) to the selected month so the
+  // published column doesn't pile up. null = 전체(all). Undated planning cards stay.
+  const [monthCursor, setMonthCursor] = useState<Date | null>(startOfMonth(TODAY));
+  const monthKey = monthCursor ? `${monthCursor.getFullYear()}-${String(monthCursor.getMonth() + 1).padStart(2, "0")}` : null;
+  const monthItems = useMemo(() => {
+    if (!monthKey) return items;
+    return items.filter((item) => {
+      const iso = item.publishedAt ?? isoFromPublishDate(item.publishDate);
+      return !iso || iso.slice(0, 7) === monthKey;
+    });
+  }, [items, monthKey]);
   const editorContentLibrary = useMemo(() => {
     const cardIds = new Set(items.map((card) => card.id));
     return [...contentLibrary.filter((item) => !cardIds.has(item.id)), ...items];
@@ -3878,9 +4016,9 @@ function PipelineBoard({
       id: `draft-${Date.now()}`,
       title: "",
       channel: "instagram",
-      type: "릴스",
+      type: channelContentTypes.instagram[0].value,
       status: "아이디어",
-      campaign: "캠페인 없음",
+      campaign: "",
       publishDate: "미정",
       metricLabel: "자동 수집",
       metricValue: "게시물 연결 후",
@@ -3907,10 +4045,17 @@ function PipelineBoard({
           <p>카드를 이동해 운영 단계를 바꾸고, 발행된 카드는 실제 게시물 API 성과와 연결합니다.</p>
         </div>
         <div className="summary-actions">
-          <button className="button secondary">
-            <RefreshCw size={16} />
-            최신 상태
-          </button>
+          <div className="calendar-nav">
+            <button className="button secondary small" onClick={() => setMonthCursor((current) => addMonths(current ?? startOfMonth(TODAY), -1))}>
+              <ChevronLeft size={15} />
+            </button>
+            <button className="button secondary small" onClick={() => setMonthCursor((current) => (current ? null : startOfMonth(TODAY)))}>
+              {monthCursor ? `${monthCursor.getFullYear()}.${String(monthCursor.getMonth() + 1).padStart(2, "0")}` : "전체"}
+            </button>
+            <button className="button secondary small" onClick={() => setMonthCursor((current) => addMonths(current ?? startOfMonth(TODAY), 1))}>
+              <ChevronRight size={15} />
+            </button>
+          </div>
           <button className="button primary" onClick={openNewCard}>
             <Plus size={16} />
             아이디어 추가
@@ -3921,7 +4066,7 @@ function PipelineBoard({
       <div className="kanban-board">
         {columns.map((column) => (
           <KanbanColumn
-            cards={items.filter((item) => item.status === column)}
+            cards={monthItems.filter((item) => item.status === column)}
             column={column}
             key={column}
             onAdd={openNewCard}
@@ -4028,6 +4173,15 @@ function KanbanColumn({
   );
 }
 
+const channelContentTypes: Record<Exclude<ChannelId, "all">, Array<{ value: string; label: string }>> = {
+  youtube: [{ value: "Shorts", label: "쇼츠" }, { value: "Long-form", label: "롱폼" }],
+  instagram: [{ value: "Reels", label: "릴스" }, { value: "Carousel", label: "캐러셀" }, { value: "Feed", label: "피드" }],
+  website: [{ value: "Landing", label: "랜딩" }, { value: "KR Page", label: "국문 페이지" }, { value: "EN Page", label: "영문 페이지" }],
+  linkedin: [{ value: "Card", label: "카드" }, { value: "Post", label: "포스트" }],
+  naver: [{ value: "Blog", label: "블로그" }, { value: "Traffic", label: "유입" }],
+  tiktok: [{ value: "Short", label: "숏폼" }, { value: "Video", label: "영상" }],
+};
+
 function ContentCardEditor({
   card,
   campaigns,
@@ -4098,7 +4252,10 @@ function ContentCardEditor({
           <span>채널</span>
           <select
             value={form.channel}
-            onChange={(event) => update({ channel: event.target.value as Exclude<ChannelId, "all"> })}
+            onChange={(event) => {
+              const nextChannel = event.target.value as Exclude<ChannelId, "all">;
+              update({ channel: nextChannel, type: channelContentTypes[nextChannel][0]?.value ?? form.type });
+            }}
           >
             <option value="youtube">YouTube</option>
             <option value="tiktok">TikTok</option>
@@ -4110,19 +4267,30 @@ function ContentCardEditor({
         </label>
         <label className="field">
           <span>유형</span>
-          <input value={form.type} onChange={(event) => update({ type: event.target.value })} placeholder="릴스, 카드뉴스, 블로그글" />
+          <select value={form.type} onChange={(event) => update({ type: event.target.value })}>
+            {!channelContentTypes[form.channel].some((option) => option.value === form.type) && form.type && (
+              <option value={form.type}>{form.type}</option>
+            )}
+            {channelContentTypes[form.channel].map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="field">
           <span>캠페인</span>
-          <select
-            value={form.campaign ?? "캠페인 없음"}
+          <input
+            list="content-campaign-options"
+            value={form.campaign ?? ""}
             onChange={(event) => update({ campaign: event.target.value, campaignId: getCampaignIdByName(campaigns, event.target.value) })}
-          >
-            <option>캠페인 없음</option>
+            placeholder="캠페인 검색 또는 입력"
+          />
+          <datalist id="content-campaign-options">
             {campaigns.map((campaign) => (
-              <option key={campaign.id}>{campaign.campaign}</option>
+              <option key={campaign.id} value={campaign.campaign} />
             ))}
-          </select>
+          </datalist>
         </label>
         <label className="field">
           <span>단계</span>

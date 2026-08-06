@@ -786,6 +786,16 @@ contentLabSnapshot.ads = contentLabSnapshot.ads.map((ad) => {
   };
 });
 
+// Flag everything in the mock snapshots as demo data so the UI can hide it when
+// the demo toggle is off. Real data loaded from Supabase carries no isDemo flag.
+channels.forEach((channel) => {
+  channel.topContent = channel.topContent.map((item) => ({ ...item, isDemo: true }));
+});
+contentLabSnapshot.pipeline = contentLabSnapshot.pipeline.map((item) => ({ ...item, isDemo: true }));
+contentLabSnapshot.archive = contentLabSnapshot.archive.map((item) => ({ ...item, isDemo: true }));
+contentLabSnapshot.campaigns = contentLabSnapshot.campaigns.map((item) => ({ ...item, isDemo: true }));
+contentLabSnapshot.ads = contentLabSnapshot.ads.map((item) => ({ ...item, isDemo: true }));
+
 export function buildPeriodComparison(
   scope: ChannelId,
   detail: string,

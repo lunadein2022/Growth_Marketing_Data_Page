@@ -62,6 +62,7 @@ export interface ContentItem {
   campaign?: string;
   publishDate: string;
   publishedAt?: string; // ISO date (YYYY-MM-DD) for period-range filtering
+  isDemo?: boolean; // sample/mock data — hidden when the demo toggle is off
   metricLabel: string;
   metricValue: string;
   draft?: string;
@@ -117,6 +118,7 @@ export interface CampaignRow {
   website?: string;
   total: string;
   bestChannel: string;
+  isDemo?: boolean;
 }
 
 export interface AdContent {
@@ -138,6 +140,7 @@ export interface AdContent {
   ctr: string;
   organicLift: string;
   status: "active" | "ended" | "planned";
+  isDemo?: boolean;
 }
 
 export interface DataSourceState {
